@@ -210,15 +210,68 @@ fn line_indent_of(b: &[u8], pos: usize) -> usize {
     k - start
 }
 
-/// Whether a collection start event at `idx` opens a flow collection.
+/// Whether a collection start event opens a flow collection.
 ///
-/// A flow collection's start event points at its opening `[` or `{`, while a
-/// block one points at its first item. The exception is the implicit mapping a
-/// `k: v` pair forms inside a flow sequence -- it has no brace of its own to
-/// point at -- so the caller also treats anything nested in a flow collection
-/// as flow.
-fn is_flow_at(src: &str, idx: usize) -> bool {
-    matches!(src.as_bytes().get(idx), Some(b'[') | Some(b'{'))
+/// A flow collection's start event spans its opening `[` or `{`, while a block
+/// one has an empty span pointing at its first item. Requiring a non-empty
+/// span matters when a block mapping's key is itself a flow collection
+/// (`[flow]: block`): both events report the same index, and only the inner
+/// one actually covers the bracket.
+///
+/// The remaining case is the implicit mapping a `k: v` pair forms inside a
+/// flow sequence. It has no brace of its own, so the caller treats a
+/// collection opening within its parent's brackets as flow too.
+fn is_flow_at(src: &str, start: usize, end: usize) -> bool {
+    end > start && matches!(src.as_bytes().get(start), Some(b'[') | Some(b'{'))
+}
+
+/// The index just past the bracket closing the flow collection that opens at
+/// `idx`, skipping over quoted scalars so a bracket inside a string does not
+/// count. Returns the end of input if the document never closes it.
+fn flow_extent(src: &str, idx: usize) -> usize {
+    let b = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = idx;
+    while i < b.len() {
+        match b[i] {
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            b'\'' => {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        if i + 1 < b.len() && b[i + 1] == b'\'' {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'"' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
 }
 
 fn events(src: &str) -> Result<Vec<String>, String> {
@@ -233,10 +286,14 @@ fn events(src: &str) -> Result<Vec<String>, String> {
     };
 
     let mut out = Vec::new();
-    // Whether each open collection is a flow collection. A `k: v` pair inside
-    // a flow sequence starts an implicit mapping with no brace of its own, so
-    // it is flow by virtue of its parent rather than by its span.
-    let mut flow_stack: Vec<bool> = Vec::new();
+    // For each open collection, the byte at which its flow context ends: the
+    // matching `]`/`}` for a flow collection, or None for a block one. A
+    // `k: v` pair inside a flow sequence starts an implicit mapping with no
+    // brace of its own, so it is flow by virtue of sitting inside its parent's
+    // brackets rather than by its own span. The bound matters because the
+    // reverse also happens -- a block mapping may have a flow collection as
+    // its key, and its later entries are not flow.
+    let mut flow_stack: Vec<Option<usize>> = Vec::new();
     let mut parser = Parser::new_from_str(src);
     // The suite reports `-DOC ...` only for a document closed by an explicit
     // `...`. DocumentEnd carries no flag, but its span covers the marker when
@@ -244,7 +301,9 @@ fn events(src: &str) -> Result<Vec<String>, String> {
     while let Some(next) = parser.next_event() {
         let (ev, span) = next.map_err(|e| e.to_string())?;
         let start = span.start.index();
-        let in_flow = *flow_stack.last().unwrap_or(&false);
+        // Inherit flow only while genuinely inside the parent's brackets.
+        let inherited_end = flow_stack.last().copied().flatten().unwrap_or(0);
+        let in_flow = start < inherited_end;
         match ev {
             Event::StreamStart => out.push("+STR".to_string()),
             Event::StreamEnd => {
@@ -259,8 +318,11 @@ fn events(src: &str) -> Result<Vec<String>, String> {
                 out.push(if explicit { "-DOC ..." } else { "-DOC" }.to_string());
             }
             Event::MappingStart(anchor, tag) => {
-                let flow = is_flow_at(src, start) || in_flow;
-                flow_stack.push(flow);
+                let own = is_flow_at(src, start, span.end.index());
+                let flow = own || in_flow;
+                flow_stack.push(flow.then(|| {
+                    if own { flow_extent(src, start) } else { inherited_end }
+                }));
                 out.push(format!(
                     "+MAP{}{}",
                     if flow { " {}" } else { "" },
@@ -272,8 +334,11 @@ fn events(src: &str) -> Result<Vec<String>, String> {
                 out.push("-MAP".to_string());
             }
             Event::SequenceStart(anchor, tag) => {
-                let flow = is_flow_at(src, start) || in_flow;
-                flow_stack.push(flow);
+                let own = is_flow_at(src, start, span.end.index());
+                let flow = own || in_flow;
+                flow_stack.push(flow.then(|| {
+                    if own { flow_extent(src, start) } else { inherited_end }
+                }));
                 out.push(format!(
                     "+SEQ{}{}",
                     if flow { " []" } else { "" },
