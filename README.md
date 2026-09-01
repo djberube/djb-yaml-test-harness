@@ -14,6 +14,7 @@ PyYAML (CSafeLoader)   330   82.1%               16             5             51
 rapidyaml              377   93.8%                4             3             18
 js-yaml                402  100.0%                .             .              .
 go-yaml v3             323   80.3%               15             6             58
+saphyr                 402  100.0%                .             .              .
 SnakeYAML Engine       338   84.1%                6             2             56
 ```
 
