@@ -1,0 +1,43 @@
+# Runs the harness and publishes the reports as a build artifact.
+#
+# The job does not fail when a parser fails test cases -- that is the output,
+# not an error. It fails only when the harness itself cannot run a parser,
+# which bin/conform signals with a non-zero exit.
+name: conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so a parser release that changes the numbers shows up on its own
+    # rather than waiting for someone to push.
+    - cron: '0 6 * * 1'
+
+jobs:
+  conform:
+    runs-on: ubuntu-latest
+    # The images compile libfyaml, Psych and a Rust binary from source on a
+    # cold cache, which dominates the run.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Run the suite
+        run: ./bin/conform
+
+      - name: Summarize
+        if: always()
+        run: cat reports/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-reports
+          path: reports/
