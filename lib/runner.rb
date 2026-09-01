@@ -105,8 +105,11 @@ module Runner
         # The suite says this document must be rejected.
         return mk.call(:pass, emitted[:lines].first.to_s.strip) unless emitted[:ok]
 
-        return mk.call(:accepts_invalid, 'parsed a document the suite marks invalid',
-                       emitted[:lines])
+        # Say what it built instead of raising. "parsed a document the suite
+        # marks invalid" is true of every row in this category and so tells a
+        # reader nothing; the shape it produced is the part worth seeing.
+        got = emitted[:lines].map(&:rstrip).reject(&:empty?)
+        return mk.call(:accepts_invalid, "built #{summarize(got)}", got)
       end
 
       unless emitted[:ok]
@@ -117,6 +120,21 @@ module Runner
       return mk.call(:pass, nil, got) if kase.events.nil? || got == kase.events
 
       mk.call(:wrong_events, first_divergence(got, kase.events), got)
+    end
+
+    # A one-line description of what a parser built, for the accepts-invalid
+    # rows where there is no expected stream to diff against.
+    def summarize(events)
+      body = events.reject { |l| l.start_with?('+STR', '-STR', '+DOC', '-DOC') }
+      return 'an empty document' if body.empty?
+
+      kind = case body.first
+             when /\A\+MAP/ then 'a mapping'
+             when /\A\+SEQ/ then 'a sequence'
+             when /\A=VAL/ then "the scalar #{body.first.sub(/\A=VAL\s*/, '').inspect}"
+             else body.first
+             end
+      "#{kind} (#{body.size} event#{'s' unless body.size == 1})"
     end
 
     # The first line where the two streams differ, which is almost always the
