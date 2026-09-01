@@ -8,6 +8,7 @@
 #   bin/conform                          every parser, every case
 #   bin/conform --only psych,js-yaml     just these
 #   bin/conform --case '4MUZ|DK95'       just cases matching this regex
+#   bin/conform --matrix-only            the Psych version matrix and its baseline
 #   bin/conform --list                   what parsers are configured
 #   bin/conform --no-report              terminal only, write no files
 #
@@ -38,13 +39,20 @@ OptionParser.new do |o|
   o.on('--only LIST', 'comma-separated parser ids to run') do |v|
     options[:only] = v.split(',').map(&:strip)
   end
+  o.on('--matrix-only', 'just the Psych version matrix, plus the baseline it varies from') do
+    options[:only] = Parsers::MATRIX_SET.dup
+  end
   o.on('--case REGEX', 'only cases whose id matches') { |v| options[:case_filter] = v }
   o.on('--no-report', 'skip writing report files') { options[:write_reports] = false }
   o.on('--no-matrix', 'skip the per-case matrix in terminal output') { options[:matrix] = false }
   o.on('--out DIR', 'where to write reports') { |v| Config.send(:remove_const, :REPORT_DIR); Config.const_set(:REPORT_DIR, v) }
   o.on('--list', 'list configured parsers and exit') do
-    Parsers::ALL.each do |id, spec|
-      puts format('  %-14s %-22s %-11s %s', id, spec[:label], spec[:lang], spec[:note])
+    { 'parsers' => Parsers::BASE, 'psych version matrix' => Parsers::MATRIX }.each do |heading, group|
+      puts "#{heading}:"
+      group.each do |id, spec|
+        puts format('  %-14s %-30s %-8s %s', id, spec[:label], spec[:lang], spec[:note])
+      end
+      puts
     end
     exit 0
   end

@@ -38,7 +38,12 @@ module Docker
     # layer cache makes a redundant build cheap, but these images compile C
     # libraries from source, so "cheap" is still tens of seconds -- hence the
     # explicit inspect before building.
-    def ensure_image(dir, tag)
+    #
+    # `dockerfile` names a file within the context, for contexts that hold more
+    # than one image's Dockerfile. The version-matrix images share one emit.rb
+    # and a build context cannot reach above itself, so they live together in
+    # docker/psych_matrix and are told apart by -f.
+    def ensure_image(dir, tag, dockerfile: nil)
       return tag if @built[tag]
 
       raise Error, 'docker is not available; install it or pass --only for host parsers' unless available?
@@ -51,8 +56,16 @@ module Docker
       context = File.join(Config::DOCKER_DIR, dir)
       raise Error, "no docker context at #{context}" unless File.directory?(context)
 
+      argv = ['docker', 'build', '-t', tag]
+      if dockerfile
+        path = File.join(context, dockerfile)
+        raise Error, "no dockerfile at #{path}" unless File.file?(path)
+
+        argv.push('-f', path)
+      end
+
       warn "  building #{tag} (first use; cached afterwards, may take a few minutes)..."
-      out, status = Open3.capture2e('docker', 'build', '-t', tag, context)
+      out, status = Open3.capture2e(*argv, context)
       raise Error, "docker build failed for #{tag}:\n#{out}" unless status.success?
 
       @built[tag] = true

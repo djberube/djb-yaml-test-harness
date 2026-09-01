@@ -41,3 +41,40 @@ jobs:
         with:
           name: conformance-reports
           path: reports/
+
+  # The version matrix builds nine more images, each compiling libyaml and a
+  # psych extension from source, so it is not part of the push-triggered job.
+  # It changes only when COMBOS or an upstream tag changes, neither of which
+  # happens on a normal commit.
+  matrix:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Check the generated Dockerfiles are current
+        run: |
+          ruby docker/psych_matrix/generate.rb
+          git diff --exit-code docker/psych_matrix/ || {
+            echo "::error::docker/psych_matrix is stale; run ruby docker/psych_matrix/generate.rb"
+            exit 1
+          }
+
+      - name: Run the version matrix
+        run: ./bin/conform --matrix-only --out reports-matrix
+
+      - name: Summarize
+        if: always()
+        run: cat reports-matrix/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: matrix-reports
+          path: reports-matrix/

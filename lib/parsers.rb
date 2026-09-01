@@ -27,7 +27,9 @@ module Parsers
     stdout: ("=== <id> <OK|ERR>\\n" <lines>)*
   TXT
 
-  ALL = {
+  # The cross-language comparison. See COMBOS below for the Psych version
+  # matrix, which is folded into ALL further down.
+  BASE = {
     'psych' => {
       label: 'Psych (libyaml)',
       lang: 'Ruby',
@@ -120,7 +122,116 @@ module Parsers
     }
   }.freeze
 
-  DEFAULT = ALL.keys.freeze
+  # --- the Psych version matrix ----------------------------------------------
+  #
+  # Psych's behaviour is the product of three separately-versioned things: the
+  # Ruby it runs on, the psych gem, and the libyaml it links against. Varying
+  # them one at a time is what makes a difference attributable -- a row that
+  # differs from the baseline in exactly one component locates the change in
+  # that component.
+  #
+  # The baseline is ruby 3.4 / psych 5.2.2 / libyaml 0.2.5, which is what the
+  # `psych` entry above already runs, so it is not repeated here.
+  #
+  # These are representative, not exhaustive. A full cross-product would be
+  # ~100 images and most of the cells are uninteresting or do not build: psych
+  # 4 and 5 need Ruby 3.x, and Ruby 2.7/3.0 have no bookworm base image (hence
+  # :suite). Every combination listed here is one that actually builds and
+  # whose build asserts the versions it ended up with.
+  #
+  # Regenerate the Dockerfiles after editing this table:
+  #
+  #   ruby docker/psych_matrix/generate.rb
+  #
+  COMBOS = {
+    # Varying psych alone, against the baseline Ruby and libyaml. This is the
+    # axis most people mean by "which Psych"; it is also the axis where the
+    # YAML 1.1 to 1.2 schema work landed.
+    'psych-3.3.2' => {
+      slug: 'psych3',
+      ruby: '3.4', psych: '3.3.2', libyaml: '0.2.5',
+      note: 'Psych 3, the pre-4 parser. Ruby <= 3.0 shipped this line.'
+    },
+    'psych-4.0.4' => {
+      slug: 'psych4',
+      ruby: '3.4', psych: '4.0.4', libyaml: '0.2.5',
+      note: 'Psych 4, where load became safe_load by default. Ruby 3.1 shipped it.'
+    },
+    'psych-5.0.1' => {
+      slug: 'psych5-0',
+      ruby: '3.4', psych: '5.0.1', libyaml: '0.2.5',
+      note: 'First of the psych 5 line. Ruby 3.2 shipped it.'
+    },
+    'psych-5.1.2' => {
+      slug: 'psych5-1',
+      ruby: '3.4', psych: '5.1.2', libyaml: '0.2.5',
+      note: 'Psych 5.1, as shipped with Ruby 3.3.'
+    },
+
+    # Varying libyaml alone, against the baseline Ruby and psych. Nobody ships
+    # these pairings; that is the point. Holding psych fixed is what separates
+    # a C parser change from a Ruby-side one.
+    'libyaml-0.2.1' => {
+      slug: 'libyaml0-2-1',
+      ruby: '3.4', psych: '5.2.2', libyaml: '0.2.1',
+      note: 'Baseline psych against libyaml 0.2.1, four patch releases back.'
+    },
+    'libyaml-0.2.2' => {
+      slug: 'libyaml0-2-2',
+      ruby: '3.4', psych: '5.2.2', libyaml: '0.2.2',
+      note: 'Baseline psych against the libyaml Ruby 2.7 and 3.0 shipped with.'
+    },
+    'libyaml-0.2.6' => {
+      slug: 'libyaml0-2-6',
+      ruby: '3.4', psych: '5.2.2', libyaml: '0.2.6-rc.1',
+      note: 'Baseline psych against the unreleased libyaml 0.2.6 candidate.'
+    },
+
+    # Varying Ruby alone, holding psych and libyaml at the baseline. Any
+    # difference here is the interpreter, not the parser -- which is the
+    # comparison that says whether "it broke when I upgraded Ruby" was really
+    # about Ruby at all.
+    'ruby-3.1' => {
+      slug: 'ruby3-1',
+      ruby: '3.1', psych: '5.2.2', libyaml: '0.2.5',
+      note: 'Baseline psych and libyaml on Ruby 3.1.'
+    },
+    'ruby-3.5' => {
+      slug: 'ruby3-5',
+      ruby: '3.5-rc', psych: '5.2.2', libyaml: '0.2.5',
+      note: 'Baseline psych and libyaml on the Ruby 3.5 release candidate.'
+    }
+  }.freeze
+
+  # COMBOS entries become parsers too, sharing the emitter and the protocol
+  # with every other row. Built from docker/psych_matrix with -f because the
+  # combos share one emit.rb and a build context cannot reach above itself.
+  MATRIX = COMBOS.to_h do |id, c|
+    [id, {
+      label: "Psych #{c[:psych]} (ly#{c[:libyaml]}, rb#{c[:ruby]})",
+      lang: 'Ruby',
+      note: c[:note],
+      dir: 'psych_matrix',
+      dockerfile: "Dockerfile.#{c[:slug]}",
+      tag: "djb-yaml/psych-matrix-#{c[:slug]}:1",
+      cmd: %w[ruby /emit.rb],
+      version_cmd: %w[ruby -ryaml -e print("psych#{Psych::VERSION}/libyaml#{Psych::LIBYAML_VERSION}/ruby#{RUBY_VERSION}")]
+    }]
+  end.freeze
+
+  # The matrix rows are parsers like any other, but they are not in DEFAULT:
+  # a bare `bin/conform` run should stay the cross-language comparison it was,
+  # not nine Psych builds plus everyone else. Ask for them by id, or with the
+  # --matrix-only shorthand.
+  ALL = BASE.merge(MATRIX).freeze
+
+  # Everything except the version matrix. Adding a combo to COMBOS therefore
+  # does not silently change what the headline table measures.
+  DEFAULT = BASE.keys.freeze
+
+  # The baseline the matrix varies from is `psych` itself, so it is included:
+  # rows are only interpretable against it.
+  MATRIX_SET = (['psych'] + MATRIX.keys).freeze
 
   def self.[](name) = ALL[name]
 

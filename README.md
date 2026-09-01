@@ -39,6 +39,7 @@ Later runs reuse both.
 
 ```sh
 ./bin/conform --list                      # what parsers are configured
+./bin/conform --matrix-only               # the Psych version matrix
 ./bin/conform --only psych,js-yaml        # just these two
 ./bin/conform --case '4MUZ|DK95'          # just cases matching this regex
 ./bin/conform --no-report                 # terminal only
@@ -85,10 +86,85 @@ harness does not answer.
 | `saphyr` | saphyr | Rust | maintained fork of yaml-rust |
 | `snakeyaml` | SnakeYAML Engine | Java | the YAML 1.2 rewrite |
 
+Plus nine more under `--matrix-only` that vary Ruby, psych, and libyaml
+independently; see [the Psych version matrix](#the-psych-version-matrix).
+`bin/conform --list` prints both groups.
+
 The pairs are the point. `psych` and `psych-fyaml` differ only in which C parser
 is linked in; `pyyaml` and `pyyaml-c` differ only in which Loader class runs.
 Any divergence within a pair is attributable to the C library rather than to the
 binding — which is exactly the distinction that is hard to make from the outside.
+
+## The Psych version matrix
+
+"Psych 5.2.2 does X" underspecifies the thing. Psych's behaviour is the product
+of three separately-versioned parts — the Ruby it runs on, the psych gem, and
+the libyaml it links against — and the version people quote is only the middle
+one. `bin/conform --matrix-only` builds nine images that vary one part at a time
+from a `ruby 3.4 / psych 5.2.2 / libyaml 0.2.5` baseline, so a difference between
+two rows is attributable to the one thing that differs.
+
+```
+parser                             pass  pass%  accepts-invalid  wrong-events  rejects-valid
+---------------------------------  ----  -----  ---------------  ------------  -------------
+Psych (libyaml)                     330  82.1%               16             5             51
+Psych 3.3.2 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
+Psych 4.0.4 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
+Psych 5.0.1 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
+Psych 5.1.2 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
+Psych 5.2.2 (ly0.2.1, rb3.4)        324  80.6%               14             5             59
+Psych 5.2.2 (ly0.2.2, rb3.4)        325  80.8%               14             5             58
+Psych 5.2.2 (ly0.2.6-rc.1, rb3.4)   330  82.1%               16             5             51
+Psych 5.2.2 (ly0.2.5, rb3.1)        330  82.1%               16             5             51
+Psych 5.2.2 (ly0.2.5, rb3.5-rc)     330  82.1%               16             5             51
+```
+
+Five psych versions spanning 3.3.2 to 5.2.2 score identically, and not merely in
+total: they fail the same 72 cases with the same verdict on each. Three Rubies
+from 3.1 to the 3.5 release candidate do too. Everything that separates one row
+from another in this table is libyaml.
+
+That is a narrower claim than it looks, and the narrowing matters. Psych 4's
+`load`-is-`safe_load` change and psych 5's schema work are real, and they are
+invisible here because this harness compares event streams — the layer where
+Psych is a thin binding over C. Where psych versions *do* differ is in what they
+resolve those events to, which is the [schema question this harness does not
+answer](#what-it-measures).
+
+Across libyaml the movement is directional but not monotone:
+
+| case | 0.2.1 | 0.2.2 | 0.2.5 |
+|---|---|---|---|
+| `UDM2` | rejects-valid | pass | pass |
+| `27NA` `6ZKB` `9DXL` `DK95#7` `JR7V` `RTP8` `WZ62` | rejects-valid | rejects-valid | pass |
+| `U99R` | accepts-invalid | accepts-invalid | pass |
+| `EB22` `MUS6#1` `RHX7` | pass | pass | accepts-invalid |
+
+0.2.5 fixes nine cases the older builds get wrong and regresses three, accepting
+documents the suite marks ill-formed that 0.2.1 correctly rejected. The 0.2.6
+release candidate changes nothing either way. Upgrading libyaml is a net win of
+six cases, not a clean one — and since these are the same psych gem throughout,
+none of it is attributable to Ruby.
+
+### Adding a combination
+
+`COMBOS` in `lib/parsers.rb` is the table; the Dockerfiles are generated from it.
+
+```sh
+$EDITOR lib/parsers.rb
+ruby docker/psych_matrix/generate.rb
+./bin/conform --only libyaml-0.2.1
+```
+
+One Dockerfile per combination, checked in, rather than one parameterised file
+built with `--build-arg`: build args leave no trace in the image, so an image
+built from them cannot be traced back to what produced it.
+
+Not every combination is valid. Psych 4 and 5 need Ruby 3.x, Ruby 2.7 and 3.0
+have no bookworm base image, and libyaml before 0.2.1 lacks API psych 5 calls.
+Each image asserts its own `Psych::VERSION` and `Psych::LIBYAML_VERSION` at build
+time, so an invalid combination fails the build instead of quietly reporting a
+row that says something other than what it claims.
 
 ## Reports
 

@@ -28,7 +28,7 @@ module Runner
     # returns them all.
     def run(parser_name, cases, &progress)
       spec = Parsers[parser_name] or raise ArgumentError, "unknown parser #{parser_name}"
-      Docker.ensure_image(spec[:dir], spec[:tag])
+      Docker.ensure_image(spec[:dir], spec[:tag], dockerfile: spec[:dockerfile])
 
       results = []
       cases.each_slice(Config::BATCH_SIZE) do |batch|
@@ -45,7 +45,7 @@ module Runner
     # The parser's self-reported version, for the report header.
     def version(parser_name)
       spec = Parsers[parser_name]
-      Docker.ensure_image(spec[:dir], spec[:tag])
+      Docker.ensure_image(spec[:dir], spec[:tag], dockerfile: spec[:dockerfile])
       out, status = Open3.capture2e(
         *Docker.run_argv(spec[:tag], Dir.tmpdir, spec[:version_cmd])
       )
