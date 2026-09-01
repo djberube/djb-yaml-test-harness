@@ -4,28 +4,51 @@ Runs the [yaml-test-suite](https://github.com/yaml/yaml-test-suite) against nine
 YAML parsers across seven languages and reports where each one disagrees with
 the spec — and with the others.
 
+The suite states two expectations per case, and this harness scores both
+separately. `tree:` is the event stream the parser should build; `json:` is the
+value the library should hand back. They are different questions, and a parser
+can pass one while failing the other.
+
+**Event streams** — what the parser built:
+
 ```
 parser                pass   pass%  accepts-invalid  wrong-events  rejects-valid
 --------------------  ----  ------  ---------------  ------------  -------------
-Psych (libyaml)        330   82.1%               16             5             51
-Psych (libfyaml)       402  100.0%                .             .              .
-PyYAML (pure)          329   81.8%               14             5             54
-PyYAML (CSafeLoader)   330   82.1%               16             5             51
-rapidyaml              377   93.8%                4             3             18
-js-yaml                402  100.0%                .             .              .
-go-yaml v3             323   80.3%               15             6             58
-saphyr                 402  100.0%                .             .              .
-SnakeYAML Engine       338   84.1%                6             2             56
+Psych (libyaml)        331   81.7%               16             4             54
+Psych (libfyaml)       403   99.5%                .             .              2
+PyYAML (pure)          331   81.7%               14             4             56
+PyYAML (CSafeLoader)   331   81.7%               16             4             54
+rapidyaml              379   93.6%                4             3             19
+js-yaml                404   99.8%                .             .              1
+go-yaml v3             324   80.0%               15             5             61
+saphyr                 403   99.5%                .             .              2
+SnakeYAML Engine       339   83.7%                6             1             59
 ```
 
+**Loaded values** — what the library resolved that into, over the 365 cases the
+suite states a `json:` for:
+
+```
+parser            pass  pass%  accepts-invalid  wrong-value  rejects-valid
+----------------  ----  -----  ---------------  -----------  -------------
+Psych (libyaml)    301  82.5%               16           11             37
+Psych (libfyaml)   353  96.7%                .           11              1
+```
+
+Only the Ruby emitters implement the value pass so far; the others are scored on
+events alone. That gap is the interesting part of the table. Psych on libfyaml
+parses almost everything correctly — 403 of 405 event streams — and still gets
+eleven values wrong, the same count as the libyaml build. Swapping the C parser
+fixes the syntax layer and leaves `Psych::ScalarScanner` untouched on top of it.
+
 Every parser runs in its own container against a pinned library version, so a
-number in that table is attributable to a specific build rather than to
+number in those tables is attributable to a specific build rather than to
 whatever happened to be installed.
 
-Two rows in that table are the same Ruby, the same Psych, and the same emitter,
-differing only in which C library is linked in. Two others are the same PyYAML
-differing only in the Loader class — and `pyyaml-c` matches `psych` in every
-column, because underneath both is the same libyaml.
+Two rows are the same Ruby, the same Psych, and the same emitter, differing only
+in which C library is linked in. Two others are the same PyYAML differing only
+in the Loader class — and `pyyaml-c` matches `psych` in every column, because
+underneath both is the same libyaml.
 
 ## Quick start
 
@@ -40,6 +63,8 @@ Later runs reuse both.
 ```sh
 ./bin/conform --list                      # what parsers are configured
 ./bin/conform --matrix-only               # the Psych version matrix
+./bin/conform --values                    # score events and loaded values
+./bin/conform --values-only               # score loaded values instead
 ./bin/conform --only psych,js-yaml        # just these two
 ./bin/conform --case '4MUZ|DK95'          # just cases matching this regex
 ./bin/conform --no-report                 # terminal only
@@ -67,10 +92,29 @@ A fourth, `harness-error`, means the runner itself failed. That is a bug here,
 not a parser verdict, and is reported separately so it never inflates a
 parser's failure count.
 
-**This measures the parser layer only.** The event DSL records tags but not
-resolved native types, so a parser can score well while still resolving `no` to
-`false` or `20:03:20` to `72200`. Schema conformance is a separate question this
-harness does not answer.
+### The two scores
+
+The event DSL records tags but not resolved native types, so an event-stream
+pass says nothing about what the library hands back. `bin/conform --values` runs
+the second pass, comparing the loaded value against the suite's `json:`.
+
+That is where Psych's Ruby-isms show up, and they are not fixed by changing the
+C parser:
+
+| case | expected | Psych gives |
+|---|---|---|
+| `FBC9` | `":foo"` | `:foo`, a Symbol |
+| `Y2GN` | `"value"` | `:"chor value"` |
+| `U9NS` | `"20:03:20"` | `72200`, sexagesimal |
+
+`FBC9`, `S7BG`, `U9NS` and four others fail on **both** backends. The suite ships
+the correct event stream for all of them, and Psych emits it — the value is
+wrong one layer later, in `Psych::ScalarScanner`.
+
+Only cases with a `json:` are scored in the value run. The suite omits it where a
+document has no meaningful JSON projection (an empty stream, a duplicate key, a
+value JSON cannot represent), and counting "no expectation" as a pass would
+inflate every parser by the same ~40 cases.
 
 ## Parsers
 
@@ -105,31 +149,33 @@ from a `ruby 3.4 / psych 5.2.2 / libyaml 0.2.5` baseline, so a difference betwee
 two rows is attributable to the one thing that differs.
 
 ```
-parser                             pass  pass%  accepts-invalid  wrong-events  rejects-valid
----------------------------------  ----  -----  ---------------  ------------  -------------
-Psych (libyaml)                     330  82.1%               16             5             51
-Psych 3.3.2 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
-Psych 4.0.4 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
-Psych 5.0.1 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
-Psych 5.1.2 (ly0.2.5, rb3.4)        330  82.1%               16             5             51
-Psych 5.2.2 (ly0.2.1, rb3.4)        324  80.6%               14             5             59
-Psych 5.2.2 (ly0.2.2, rb3.4)        325  80.8%               14             5             58
-Psych 5.2.2 (ly0.2.6-rc.1, rb3.4)   330  82.1%               16             5             51
-Psych 5.2.2 (ly0.2.5, rb3.1)        330  82.1%               16             5             51
-Psych 5.2.2 (ly0.2.5, rb3.5-rc)     330  82.1%               16             5             51
+                                   ---- events ----   ---- values ----
+parser                             pass  pass%        pass  pass%   wrong-value
+---------------------------------  ----  -----        ----  -----   -----------
+Psych (libyaml)                     331  81.7%         301  82.5%            11
+Psych 3.3.2 (ly0.2.5, rb3.4)        331  81.7%         301  82.5%            11
+Psych 4.0.4 (ly0.2.5, rb3.4)        331  81.7%         301  82.5%            11
+Psych 5.0.1 (ly0.2.5, rb3.4)        331  81.7%         301  82.5%            11
+Psych 5.1.2 (ly0.2.5, rb3.4)        331  81.7%         301  82.5%            11
+Psych 5.2.2 (ly0.2.1, rb3.4)        325  80.2%         295  80.8%            11
+Psych 5.2.2 (ly0.2.2, rb3.4)        326  80.5%         296  81.1%            11
+Psych 5.2.2 (ly0.2.6-rc.1, rb3.4)   331  81.7%         301  82.5%            11
+Psych 5.2.2 (ly0.2.5, rb3.1)        331  81.7%         301  82.5%            11
+Psych 5.2.2 (ly0.2.5, rb3.5-rc)     331  81.7%         301  82.5%            11
 ```
 
 Five psych versions spanning 3.3.2 to 5.2.2 score identically, and not merely in
-total: they fail the same 72 cases with the same verdict on each. Three Rubies
-from 3.1 to the 3.5 release candidate do too. Everything that separates one row
-from another in this table is libyaml.
+total: they fail the same cases with the same verdict on each. Three Rubies from
+3.1 to the 3.5 release candidate do too. Everything that separates one row from
+another is libyaml.
 
-That is a narrower claim than it looks, and the narrowing matters. Psych 4's
-`load`-is-`safe_load` change and psych 5's schema work are real, and they are
-invisible here because this harness compares event streams — the layer where
-Psych is a thin binding over C. Where psych versions *do* differ is in what they
-resolve those events to, which is the [schema question this harness does not
-answer](#what-it-measures).
+The value column is the interesting confirmation. Scoring what Psych *resolves*
+rather than what it parses was the obvious place for psych versions to diverge —
+psych 4's `load`-is-`safe_load` change and psych 5's schema work are real
+changes — and they do not move this number either. All eleven wrong-value cases
+are the same eleven on every row, including psych 3.3.2. `Psych::ScalarScanner`
+has been coercing `:foo` to a Symbol and `20:03:20` to `72200` across the entire
+3.x-to-5.x range.
 
 Across libyaml the movement is directional but not monotone:
 
@@ -144,7 +190,9 @@ Across libyaml the movement is directional but not monotone:
 documents the suite marks ill-formed that 0.2.1 correctly rejected. The 0.2.6
 release candidate changes nothing either way. Upgrading libyaml is a net win of
 six cases, not a clean one — and since these are the same psych gem throughout,
-none of it is attributable to Ruby.
+none of it is attributable to Ruby. The same nine-fixed, three-regressed split
+shows up in the value run, because these are parse-layer differences that the
+value run inherits.
 
 ### Adding a combination
 
@@ -168,7 +216,8 @@ row that says something other than what it claims.
 
 ## Reports
 
-Each run writes four files to `reports/`:
+Each scored run writes four files to `reports/`. With `--values` both runs are
+written, suffixed `-events` and `-value`:
 
 - **`report.md`** — summary table, per-case matrix, and a detail list per parser
 - **`report.json`** — the same data, with the full expected-vs-actual event
@@ -226,7 +275,7 @@ Environment variables, all optional:
 
 | variable | default | meaning |
 |---|---|---|
-| `YAML_SUITE_REF` | `data-2022-01-17` | which suite tag to check out |
+| `YAML_SUITE_REF` | `da267a5c` | which suite commit to check out |
 | `YAML_HARNESS_OUT` | `reports` | where reports are written |
 | `YAML_HARNESS_TIMEOUT` | `10` | per-case seconds before a batch is abandoned |
 | `YAML_HARNESS_BATCH` | `64` | cases per container invocation |
@@ -234,6 +283,13 @@ Environment variables, all optional:
 The suite ref is pinned rather than floating: an unpinned corpus would make two
 runs of the same harness disagree for reasons that have nothing to do with the
 parsers.
+
+Cases are read from the suite's `src/` directory — 351 files, each an ordinary
+YAML sequence holding `yaml:`, `tree:` and `json:` together — rather than from
+one of the generated `data-*` tags. The tags are snapshots of this same content,
+but the newest is `data-2022-01-17`, four years and 400+ commits behind, and the
+generated form drops `json:` for a third of the cases it applies to. Reading
+`src/` is what makes the value run possible.
 
 ## License
 

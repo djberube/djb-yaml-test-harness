@@ -30,11 +30,11 @@ jobs:
           ruby-version: '3.3'
 
       - name: Run the suite
-        run: ./bin/conform
+        run: ./bin/conform --values
 
       - name: Summarize
         if: always()
-        run: cat reports/report.md >> "$GITHUB_STEP_SUMMARY"
+        run: cat reports/report-*.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -67,11 +67,11 @@ jobs:
           }
 
       - name: Run the version matrix
-        run: ./bin/conform --matrix-only --out reports-matrix
+        run: ./bin/conform --matrix-only --values --out reports-matrix
 
       - name: Summarize
         if: always()
-        run: cat reports-matrix/report.md >> "$GITHUB_STEP_SUMMARY"
+        run: cat reports-matrix/report-*.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()

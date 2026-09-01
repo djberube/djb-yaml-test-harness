@@ -9,6 +9,12 @@
 #
 # `version_cmd` prints the parser's own version string, which goes into the
 # report header -- a matrix without it is not reproducible.
+#
+# `value: true` marks an emitter that also supports `--json`, which makes it
+# print the *loaded value* as JSON rather than the event stream. Those parsers
+# can be scored on the suite's `json:` expectations as well as its `tree:`
+# ones. Only the Ruby emitters do so far; the rest are event-only, and the
+# value run skips them rather than reporting a zero.
 module Parsers
   # The wire protocol between the harness and a container.
   #
@@ -35,8 +41,9 @@ module Parsers
       lang: 'Ruby',
       note: 'Ruby stdlib YAML. libyaml under the hood.',
       dir: 'psych',
-      tag: 'djb-yaml/psych:1',
+      tag: 'djb-yaml/psych:3',
       cmd: %w[ruby /emit.rb],
+      value: true,
       version_cmd: %w[ruby -ryaml -e print("psych#{Psych::VERSION}/libyaml#{Psych::LIBYAML_VERSION}")]
     },
 
@@ -45,8 +52,9 @@ module Parsers
       lang: 'Ruby',
       note: 'Psych built --enable-libfyaml: the opt-in YAML 1.2 backend.',
       dir: 'psych_fyaml',
-      tag: 'djb-yaml/psych-fyaml:1',
+      tag: 'djb-yaml/psych-fyaml:3',
       cmd: %w[ruby /emit.rb],
+      value: true,
       version_cmd: %w[ruby -ryaml -e print("psych#{Psych::VERSION}/libfyaml#{Psych.libfyaml_version}")]
     },
 
@@ -213,8 +221,9 @@ module Parsers
       note: c[:note],
       dir: 'psych_matrix',
       dockerfile: "Dockerfile.#{c[:slug]}",
-      tag: "djb-yaml/psych-matrix-#{c[:slug]}:1",
+      tag: "djb-yaml/psych-matrix-#{c[:slug]}:3",
       cmd: %w[ruby /emit.rb],
+      value: true,
       version_cmd: %w[ruby -ryaml -e print("psych#{Psych::VERSION}/libyaml#{Psych::LIBYAML_VERSION}/ruby#{RUBY_VERSION}")]
     }]
   end.freeze

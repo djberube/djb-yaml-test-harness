@@ -8,8 +8,21 @@
 # each node carries the properties its originating event did.
 #
 # Shared by the libyaml and libfyaml images; only the linked C parser differs.
+#
+# With --json, emits the *loaded value* as canonical JSON instead of the event
+# stream. That is a different question about the same parser: the event stream
+# is what the parser built, the JSON is what Psych then resolved it to. Psych
+# can produce the correct events and still hand back the wrong Ruby object --
+# `:foo` becoming a Symbol rather than the string ":foo" is the stock example --
+# so the two are scored separately.
 
 require 'yaml'
+require 'json'
+require 'date'
+# Time#iso8601 lives in the time library, not core. Ruby 3.4 happens to have it
+# loaded by the time this runs and 3.1 does not, so requiring it explicitly is
+# what keeps the two rows comparable.
+require 'time'
 
 # --- the event DSL -----------------------------------------------------------
 #
@@ -78,7 +91,67 @@ module Emit
   end
 end
 
+# --- the loaded-value projection ---------------------------------------------
+#
+# The suite states expected values as JSON, so a comparison has to project
+# Ruby onto JSON's type set. The projection is deliberately lossy in one
+# direction only: anything JSON cannot represent is rendered in a form that
+# will not accidentally equal a correct answer.
+module Value
+  # Psych resolves YAML 1.1 types that JSON has no notion of. Rendering a Date
+  # as its ISO string is what the suite's own json field expects for
+  # timestamp cases, and a Symbol as ":foo" is what makes the Symbol coercion
+  # visible as a difference rather than hiding it behind a to_s that happens to
+  # match.
+  def self.project(obj)
+    case obj
+    when Hash
+      obj.to_h { |k, v| [project_key(k), project(v)] }
+    when Array
+      obj.map { |v| project(v) }
+    when Symbol
+      # A Symbol here is Psych resolving `:foo` to :foo where the suite expects
+      # the *string* ":foo". Rendering it as ":foo" would make the projection
+      # launder the bug into a pass, so it is tagged: JSON has no symbol type,
+      # and a parser that returns one has not returned what the suite asked for.
+      "#<Symbol :#{obj}>"
+    when Date, Time
+      obj.iso8601
+    when Psych::Omap
+      obj.map { |k, v| { project_key(k) => project(v) } }
+    when Psych::Set
+      obj.keys.to_h { |k| [project_key(k), true] }
+    when String, Integer, Float, TrueClass, FalseClass, NilClass
+      obj
+    else
+      # Anything else is a Ruby object the suite cannot have meant. Naming the
+      # class makes the report say what happened instead of silently coercing.
+      "#<#{obj.class}>"
+    end
+  end
+
+  # JSON object keys are strings, so a non-string key has to be rendered.
+  # Psych producing a non-string key is itself often the finding.
+  def self.project_key(key)
+    k = project(key)
+    k.is_a?(String) ? k : JSON.generate(k)
+  end
+
+  # Documents are compared one per stream position. safe_load is deliberately
+  # not used: this measures what Psych's parser and scalar scanner do, and a
+  # permitted-classes refusal would score a safety policy as a parse failure.
+  def self.stream(yaml)
+    Psych.parse_stream(yaml).children.map do |doc|
+      s = Psych::Nodes::Stream.new
+      s.children << doc
+      project(s.to_ruby.first)
+    end
+  end
+end
+
 # --- the batch protocol ------------------------------------------------------
+
+MODE_JSON = ARGV.include?('--json')
 
 $stdin.binmode
 $stdout.binmode
@@ -94,7 +167,12 @@ loop do
   doc = $stdin.read(len)
 
   begin
-    lines = Emit.events(doc.force_encoding(Encoding::UTF_8))
+    text = doc.force_encoding(Encoding::UTF_8)
+    lines = if MODE_JSON
+              [JSON.generate(Value.stream(text))]
+            else
+              Emit.events(text)
+            end
     $stdout.write("=== #{id} OK\n")
     lines.each { |l| $stdout.write("#{l}\n") }
   rescue Exception => e # rubocop:disable Lint/RescueException

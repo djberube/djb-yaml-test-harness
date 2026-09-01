@@ -19,12 +19,13 @@ require_relative 'parsers'
 module Report
   # Ordered so the columns read worst-to-least-ambiguous, which is also
   # roughly the order a reader cares about: silently wrong beats loudly wrong.
-  KINDS = %i[accepts_invalid wrong_events rejects_valid harness_error].freeze
+  KINDS = %i[accepts_invalid wrong_events wrong_value rejects_valid harness_error].freeze
 
   KIND_LABEL = {
     pass: 'pass',
     accepts_invalid: 'accepts-invalid',
     wrong_events: 'wrong-events',
+    wrong_value: 'wrong-value',
     rejects_valid: 'rejects-valid',
     harness_error: 'harness-error'
   }.freeze
@@ -32,12 +33,22 @@ module Report
   KIND_BLURB = {
     accepts_invalid: 'parsed a document the suite marks ill-formed',
     wrong_events: 'parsed, but produced a different event stream',
+    wrong_value: 'parsed correctly, but resolved to a different value',
     rejects_valid: 'raised on a document the suite marks valid',
     harness_error: 'the runner failed; not a parser verdict'
   }.freeze
 
   Run = Struct.new(:results, :parsers, :versions, :case_count, :started_at,
-                   :finished_at, :suite_ref, keyword_init: true) do
+                   :finished_at, :suite_ref, :mode, :title, keyword_init: true) do
+    # Only the kinds this run can actually produce. An events run never yields
+    # wrong_value and a value run never yields wrong_events, so showing both
+    # columns would print a permanently empty one in each.
+    def kinds
+      KINDS.reject do |k|
+        (k == :wrong_value && mode != :value) || (k == :wrong_events && mode == :value)
+      end
+    end
+
     # results grouped by parser, then counted by status.
     def tally
       parsers.to_h do |p|
@@ -73,7 +84,7 @@ module Report
 
       io.puts matrix_table(run, only_failures: true)
       io.puts
-      io.puts "legend: #{KINDS.map { |k| "#{glyph(k)} #{KIND_LABEL[k]}" }.join('   ')}"
+      io.puts "legend: #{run.kinds.map { |k| "#{glyph(k)} #{KIND_LABEL[k]}" }.join('   ')}"
       io.puts
     end
 
@@ -82,7 +93,8 @@ module Report
       tally = run.tally
       total = run.case_count
 
-      head = ['parser', 'pass', 'pass%'] + KINDS.map { |k| KIND_LABEL[k] }
+      kinds = run.kinds
+      head = ['parser', 'pass', 'pass%'] + kinds.map { |k| KIND_LABEL[k] }
       rows = run.parsers.map do |p|
         counts = tally[p]
         passed = counts[:pass].to_i
@@ -90,12 +102,12 @@ module Report
           Parsers[p][:label],
           passed.to_s,
           format('%.1f%%', total.zero? ? 0 : 100.0 * passed / total)
-        ] + KINDS.map { |k| counts[k].to_i.zero? ? '.' : counts[k].to_s }
+        ] + kinds.map { |k| counts[k].to_i.zero? ? '.' : counts[k].to_s }
       end
 
       # A parser that fails nothing prints dots, so the eye lands on the
       # columns that actually have numbers in them.
-      render_table(head, rows, align: [:left, :right, :right] + KINDS.map { :right })
+      render_table(head, rows, align: [:left, :right, :right] + kinds.map { :right })
     end
 
     # Case x parser, so a row shows whether a failure is one parser's bug or
@@ -118,13 +130,15 @@ module Report
 
     # --- files ---------------------------------------------------------------
 
-    def write_all(run, dir: Config::REPORT_DIR)
+    # `suffix` keeps two runs of the same cases from overwriting each other
+    # when both the event and value scores are written in one invocation.
+    def write_all(run, dir: Config::REPORT_DIR, suffix: nil)
       FileUtils.mkdir_p(dir)
       paths = {
-        markdown: File.join(dir, 'report.md'),
-        json: File.join(dir, 'report.json'),
-        csv: File.join(dir, 'matrix.csv'),
-        text: File.join(dir, 'report.txt')
+        markdown: File.join(dir, "report#{suffix}.md"),
+        json: File.join(dir, "report#{suffix}.json"),
+        csv: File.join(dir, "matrix#{suffix}.csv"),
+        text: File.join(dir, "report#{suffix}.txt")
       }
       File.write(paths[:markdown], markdown(run))
       File.write(paths[:json], JSON.pretty_generate(as_json(run)))
@@ -139,13 +153,13 @@ module Report
       out << "\n## Summary\n\n"
       out << md_table(summary_head(run), summary_rows(run))
       out << "\nFailure kinds:\n\n"
-      KINDS.each { |k| out << "- **#{KIND_LABEL[k]}** — #{KIND_BLURB[k]}\n" }
+      run.kinds.each { |k| out << "- **#{KIND_LABEL[k]}** — #{KIND_BLURB[k]}\n" }
 
       out << "\n## Failures by case\n\n"
       if run.failing_case_ids.empty?
         out << "Every parser passed every case.\n"
       else
-        out << "`.` passed · #{KINDS.map { |k| "`#{glyph(k)}` #{KIND_LABEL[k]}" }.join(' · ')}\n\n"
+        out << "`.` passed · #{run.kinds.map { |k| "`#{glyph(k)}` #{KIND_LABEL[k]}" }.join(' · ')}\n\n"
         head = ['case'] + run.parsers.map { |p| short(p) }
         by_key = run.results.to_h { |r| [[r.case_id, r.parser], r] }
         rows = run.failing_case_ids.map do |id|
@@ -174,6 +188,7 @@ module Report
     def as_json(run)
       {
         generated_at: Time.now.utc.iso8601,
+        scored: run.mode,
         suite_ref: run.suite_ref,
         case_count: run.case_count,
         duration_seconds: run.duration&.round(1),
@@ -188,7 +203,7 @@ module Report
             note: spec[:note],
             pass: counts[:pass].to_i,
             pass_rate: run.case_count.zero? ? 0 : (100.0 * counts[:pass].to_i / run.case_count).round(2),
-            **KINDS.to_h { |k| [k, counts[k].to_i] }
+            **run.kinds.to_h { |k| [k, counts[k].to_i] }
           }
         end,
         failures: run.failures.map do |r|
@@ -229,6 +244,7 @@ module Report
 
     def run_header(run)
       lines = [
+        "scored: #{run.title || run.mode}",
         "suite: #{run.suite_ref}  (#{run.case_count} cases)",
         "run:   #{run.finished_at&.utc&.iso8601 || Time.now.utc.iso8601}"
       ]
@@ -242,7 +258,7 @@ module Report
     end
 
     def summary_head(run)
-      ['parser', 'language', 'version', 'pass', 'pass %'] + KINDS.map { |k| KIND_LABEL[k] }
+      ['parser', 'language', 'version', 'pass', 'pass %'] + run.kinds.map { |k| KIND_LABEL[k] }
     end
 
     def summary_rows(run)
@@ -255,15 +271,15 @@ module Report
           spec[:label], spec[:lang], run.versions[p] || '?',
           "#{passed}/#{run.case_count}",
           format('%.1f%%', run.case_count.zero? ? 0 : 100.0 * passed / run.case_count)
-        ] + KINDS.map { |k| counts[k].to_i.to_s }
+        ] + run.kinds.map { |k| counts[k].to_i.to_s }
       end
     end
 
     # A single character per failure kind, so the matrix stays narrow enough
     # to read at nine parsers wide.
     def glyph(status)
-      { accepts_invalid: 'A', wrong_events: 'W', rejects_valid: 'R',
-        harness_error: '!' }.fetch(status, '?')
+      { accepts_invalid: 'A', wrong_events: 'W', wrong_value: 'V',
+        rejects_valid: 'R', harness_error: '!' }.fetch(status, '?')
     end
 
     # Column headers for the matrix. Full labels would make the grid wider
@@ -273,7 +289,19 @@ module Report
         'psych' => 'psych', 'psych-fyaml' => 'fyaml', 'pyyaml' => 'pyyaml',
         'pyyaml-c' => 'pyy-c', 'rapidyaml' => 'ryml', 'js-yaml' => 'jsyaml',
         'go-yaml' => 'go', 'saphyr' => 'saphyr', 'snakeyaml' => 'snake'
-      }.fetch(parser_id, parser_id[0, 6])
+      }.fetch(parser_id) { matrix_short(parser_id) }
+    end
+
+    # Matrix ids share long prefixes (libyaml-0.2.1 and libyaml-0.2.2 differ in
+    # the last character), so a blind truncation would collide. Keep the part
+    # that actually varies.
+    def matrix_short(parser_id)
+      case parser_id
+      when /\Apsych-(\d[\d.]*)\z/ then "p#{Regexp.last_match(1)}"
+      when /\Alibyaml-([\d.]+)\z/ then "ly#{Regexp.last_match(1).delete_prefix('0.')}"
+      when /\Aruby-([\d.]+)\z/ then "rb#{Regexp.last_match(1)}"
+      else parser_id[0, 6]
+      end
     end
 
     def render_table(head, rows, align:)

@@ -8,6 +8,7 @@
 #   bin/conform                          every parser, every case
 #   bin/conform --only psych,js-yaml     just these
 #   bin/conform --case '4MUZ|DK95'       just cases matching this regex
+#   bin/conform --values                 score event streams and loaded values
 #   bin/conform --matrix-only            the Psych version matrix and its baseline
 #   bin/conform --list                   what parsers are configured
 #   bin/conform --no-report              terminal only, write no files
@@ -30,7 +31,8 @@ options = {
   only: nil,
   case_filter: nil,
   write_reports: true,
-  matrix: true
+  matrix: true,
+  score: %i[events]
 }
 
 OptionParser.new do |o|
@@ -41,6 +43,12 @@ OptionParser.new do |o|
   end
   o.on('--matrix-only', 'just the Psych version matrix, plus the baseline it varies from') do
     options[:only] = Parsers::MATRIX_SET.dup
+  end
+  o.on('--values', 'also score loaded values against the suite json:') do
+    options[:score] = %i[events value]
+  end
+  o.on('--values-only', 'score loaded values instead of event streams') do
+    options[:score] = %i[value]
   end
   o.on('--case REGEX', 'only cases whose id matches') { |v| options[:case_filter] = v }
   o.on('--no-report', 'skip writing report files') { options[:write_reports] = false }
@@ -75,58 +83,100 @@ abort 'error: no cases matched' if cases.empty?
 
 warn "running #{cases.size} cases against #{parsers.size} parser(s)"
 
-started = Time.now
-results = []
-versions = {}
+# Each mode is a separate run over the same cases, reported separately. They
+# answer different questions -- what the parser built, versus what the library
+# resolved that into -- and averaging them would describe neither.
+MODES = {
+  events: {
+    title: 'event streams (the suite\'s tree:)',
+    blurb: 'what the parser built, compared against the expected event stream'
+  },
+  value: {
+    title: 'loaded values (the suite\'s json:)',
+    blurb: 'what the library resolved that into, compared against the expected JSON'
+  }
+}.freeze
+
+runs = []
 failed_parsers = []
 
-parsers.each do |name|
-  spec = Parsers[name]
-  print format('  %-22s ', spec[:label])
-  $stdout.flush
+options[:score].each do |mode|
+  eligible = parsers.select { |n| mode == :events || Parsers[n][:value] }
 
-  begin
-    versions[name] = Runner.version(name)
-    done = 0
-    rows = Runner.run(name, cases) do |_r|
-      done += 1
-      # A dot per 25 cases keeps the line short but shows the run is alive.
-      if (done % 25).zero?
-        print '.'
-        $stdout.flush
-      end
-    end
-    results.concat(rows)
-    passed = rows.count(&:pass?)
-    puts format(' %d/%d', passed, cases.size)
-  rescue Docker::Error => e
-    puts ' SKIPPED'
-    warn "    #{e.message.lines.first.to_s.strip}"
-    failed_parsers << name
+  if eligible.empty?
+    warn "skipping the #{mode} run: no selected parser can score it"
+    next
   end
+
+  # The value run only scores cases the suite states a json: for. Counting the
+  # rest as passes would inflate every parser by the same ~130 cases and make
+  # the two runs look closer than they are.
+  mode_cases = mode == :value ? cases.select { |c| c.value? || c.error? } : cases
+
+  puts
+  puts "#{MODES[mode][:title]} — #{eligible.size} parser(s), #{mode_cases.size} cases"
+
+  started = Time.now
+  results = []
+  versions = {}
+
+  eligible.each do |name|
+    spec = Parsers[name]
+    print format('  %-22s ', spec[:label])
+    $stdout.flush
+
+    begin
+      versions[name] = Runner.version(name)
+      done = 0
+      rows = Runner.run(name, mode_cases, mode: mode) do |_r|
+        done += 1
+        # A dot per 25 cases keeps the line short but shows the run is alive.
+        if (done % 25).zero?
+          print '.'
+          $stdout.flush
+        end
+      end
+      results.concat(rows)
+      puts format(' %d/%d', rows.count(&:pass?), mode_cases.size)
+    rescue Docker::Error => e
+      puts ' SKIPPED'
+      warn "    #{e.message.lines.first.to_s.strip}"
+      failed_parsers << name
+    end
+  end
+
+  ran = eligible - failed_parsers
+  next if ran.empty?
+
+  runs << Report::Run.new(
+    results: results,
+    parsers: ran,
+    versions: versions,
+    case_count: mode_cases.size,
+    started_at: started,
+    finished_at: Time.now,
+    suite_ref: Config::SUITE_REF,
+    mode: mode,
+    title: MODES[mode][:title]
+  )
 end
 
-parsers -= failed_parsers
-if parsers.empty?
-  abort 'error: no parser could be run'
+abort 'error: no parser could be run' if runs.empty?
+
+runs.each do |run|
+  puts
+  puts "== #{run.title}"
+  puts "   #{MODES[run.mode][:blurb]}"
+  Report.terminal(run, matrix: options[:matrix])
 end
-
-run = Report::Run.new(
-  results: results,
-  parsers: parsers,
-  versions: versions,
-  case_count: cases.size,
-  started_at: started,
-  finished_at: Time.now,
-  suite_ref: Config::SUITE_REF
-)
-
-Report.terminal(run, matrix: options[:matrix])
 
 if options[:write_reports]
-  paths = Report.write_all(run)
-  puts 'wrote:'
-  paths.each_value { |p| puts "  #{p.sub("#{Config::ROOT}/", '')}" }
+  runs.each do |run|
+    suffix = runs.size > 1 ? "-#{run.mode}" : nil
+    paths = Report.write_all(run, suffix: suffix)
+    puts "wrote (#{run.mode}):"
+    paths.each_value { |p| puts "  #{p.sub("#{Config::ROOT}/", '')}" }
+  end
 end
 
 exit(failed_parsers.empty? ? 0 : 1)

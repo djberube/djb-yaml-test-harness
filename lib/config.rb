@@ -10,10 +10,18 @@ module Config
   SUITE_DIR = File.join(ROOT, 'vendor', 'yaml-test-suite')
   SUITE_URL = 'https://github.com/yaml/yaml-test-suite.git'
 
-  # The `data-*` tags hold one directory per case with in.yaml and test.event
-  # already expanded, which is the layout this harness reads. `main` keeps the
-  # cases as .tml source files instead and would need parsing first.
-  SUITE_REF = ENV.fetch('YAML_SUITE_REF', 'data-2022-01-17')
+  # `main`, not one of the `data-*` tags. The tags are generated snapshots of
+  # this same content and the newest is data-2022-01-17, which is nearly four
+  # years and 400+ commits stale. `main/src` is the source those snapshots are
+  # generated from: 351 files, each an ordinary YAML sequence of cases holding
+  # `yaml:`, `tree:` and `json:` together. Reading it directly is what makes
+  # the json comparison possible at all, since the expanded layout drops it for
+  # a third of the cases.
+  #
+  # Pinned to a commit rather than the branch tip: an unpinned corpus would
+  # make two runs of the same harness disagree for reasons that have nothing to
+  # do with the parsers.
+  SUITE_REF = ENV.fetch('YAML_SUITE_REF', 'da267a5c')
 
   DOCKER_DIR = File.join(ROOT, 'docker')
   REPORT_DIR = File.join(ROOT, ENV.fetch('YAML_HARNESS_OUT', 'reports'))
