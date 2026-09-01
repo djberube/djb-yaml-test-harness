@@ -1,0 +1,17 @@
+# The yaml-test-suite checkout. Cloned on demand by lib/suite.rb; pinned to a
+# tag in lib/config.rb, so it is reproducible without being vendored.
+/vendor/
+
+# Generated reports.
+/reports/
+
+# Editor and OS noise.
+*.swp
+.DS_Store
+
+# Rust build output from the saphyr image context.
+/docker/saphyr/target/
+
+# Python bytecode from running an emitter on the host during development.
+__pycache__/
+*.pyc

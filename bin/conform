@@ -1,0 +1,124 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Runs the yaml-test-suite against every configured parser and reports where
+# they disagree with the suite and with each other.
+#
+# Usage:
+#   bin/conform                          every parser, every case
+#   bin/conform --only psych,js-yaml     just these
+#   bin/conform --case '4MUZ|DK95'       just cases matching this regex
+#   bin/conform --list                   what parsers are configured
+#   bin/conform --no-report              terminal only, write no files
+#
+# Exit status is 0 when the run completed, 1 when a parser could not be run at
+# all. A parser failing test cases is a result, not an error, so it does not
+# change the exit status -- use the JSON report if CI needs to gate on counts.
+
+require 'optparse'
+
+$LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
+
+require 'config'
+require 'suite'
+require 'parsers'
+require 'runner'
+require 'report'
+
+options = {
+  only: nil,
+  case_filter: nil,
+  write_reports: true,
+  matrix: true
+}
+
+OptionParser.new do |o|
+  o.banner = 'usage: bin/conform [options]'
+
+  o.on('--only LIST', 'comma-separated parser ids to run') do |v|
+    options[:only] = v.split(',').map(&:strip)
+  end
+  o.on('--case REGEX', 'only cases whose id matches') { |v| options[:case_filter] = v }
+  o.on('--no-report', 'skip writing report files') { options[:write_reports] = false }
+  o.on('--no-matrix', 'skip the per-case matrix in terminal output') { options[:matrix] = false }
+  o.on('--out DIR', 'where to write reports') { |v| Config.send(:remove_const, :REPORT_DIR); Config.const_set(:REPORT_DIR, v) }
+  o.on('--list', 'list configured parsers and exit') do
+    Parsers::ALL.each do |id, spec|
+      puts format('  %-14s %-22s %-11s %s', id, spec[:label], spec[:lang], spec[:note])
+    end
+    exit 0
+  end
+  o.on('-h', '--help') { puts o; exit 0 }
+end.parse!
+
+parsers = begin
+  Parsers.resolve(options[:only])
+rescue ArgumentError => e
+  abort "error: #{e.message}"
+end
+
+cases = begin
+  Suite.cases(filter: options[:case_filter])
+rescue Suite::Error => e
+  abort "error: #{e.message}"
+end
+
+abort 'error: no cases matched' if cases.empty?
+
+warn "running #{cases.size} cases against #{parsers.size} parser(s)"
+
+started = Time.now
+results = []
+versions = {}
+failed_parsers = []
+
+parsers.each do |name|
+  spec = Parsers[name]
+  print format('  %-22s ', spec[:label])
+  $stdout.flush
+
+  begin
+    versions[name] = Runner.version(name)
+    done = 0
+    rows = Runner.run(name, cases) do |_r|
+      done += 1
+      # A dot per 25 cases keeps the line short but shows the run is alive.
+      if (done % 25).zero?
+        print '.'
+        $stdout.flush
+      end
+    end
+    results.concat(rows)
+    passed = rows.count(&:pass?)
+    puts format(' %d/%d', passed, cases.size)
+  rescue Docker::Error => e
+    puts ' SKIPPED'
+    warn "    #{e.message.lines.first.to_s.strip}"
+    failed_parsers << name
+  end
+end
+
+parsers -= failed_parsers
+if parsers.empty?
+  abort 'error: no parser could be run'
+end
+
+run = Report::Run.new(
+  results: results,
+  parsers: parsers,
+  versions: versions,
+  case_count: cases.size,
+  started_at: started,
+  finished_at: Time.now,
+  suite_ref: Config::SUITE_REF
+)
+
+Report.terminal(run, matrix: options[:matrix])
+
+if options[:write_reports]
+  paths = Report.write_all(run)
+  puts 'wrote:'
+  paths.each_value { |p| puts "  #{p.sub("#{Config::ROOT}/", '')}" }
+end
+
+exit(failed_parsers.empty? ? 0 : 1)
