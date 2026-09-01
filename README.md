@@ -8,13 +8,23 @@ the spec — and with the others.
 parser                pass   pass%  accepts-invalid  wrong-events  rejects-valid
 --------------------  ----  ------  ---------------  ------------  -------------
 Psych (libyaml)        330   82.1%               16             5             51
+Psych (libfyaml)       402  100.0%                .             .              .
+PyYAML (pure)          329   81.8%               14             5             54
+PyYAML (CSafeLoader)   330   82.1%               16             5             51
+rapidyaml              377   93.8%                4             3             18
 js-yaml                402  100.0%                .             .              .
+go-yaml v3             323   80.3%               15             6             58
 SnakeYAML Engine       338   84.1%                6             2             56
 ```
 
 Every parser runs in its own container against a pinned library version, so a
 number in that table is attributable to a specific build rather than to
 whatever happened to be installed.
+
+Two rows in that table are the same Ruby, the same Psych, and the same emitter,
+differing only in which C library is linked in. Two others are the same PyYAML
+differing only in the Loader class — and `pyyaml-c` matches `psych` in every
+column, because underneath both is the same libyaml.
 
 ## Quick start
 
