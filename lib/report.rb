@@ -66,6 +66,83 @@ module Report
       failures.map(&:case_id).uniq.sort
     end
 
+    # --- agreement ------------------------------------------------------------
+    #
+    # Conformance asks whether a parser matched the suite. Agreement asks
+    # whether two parsers matched *each other*, which is a different question
+    # with a different answer: two libraries can fail the same case in two
+    # different ways, or agree exactly while both being wrong. Neither shows up
+    # in a pass/fail tally.
+    #
+    # This is the practical question behind "will this document survive a trip
+    # through another language's parser", which is what a YAML file in a polyglot
+    # repo actually has to do.
+
+    # What one parser produced for one case, reduced to a comparable value.
+    #
+    # A parse error compares as the single symbol :error rather than by message,
+    # because two parsers rejecting the same document agree about the document
+    # even when their diagnostics read nothing alike.
+    def output_for(parser, case_id)
+      r = index[[case_id, parser]]
+      return nil if r.nil? || r.status == :harness_error
+
+      r.got.nil? ? :error : r.got
+    end
+
+    def index
+      @index ||= results.to_h { |r| [[r.case_id, r.parser], r] }
+    end
+
+    def case_ids
+      @case_ids ||= results.map(&:case_id).uniq
+    end
+
+    # Cases where both parsers produced something comparable, and how many of
+    # those they produced the *same* thing for.
+    def agreement(a, b)
+      shared = 0
+      same = 0
+      case_ids.each do |id|
+        oa = output_for(a, id)
+        ob = output_for(b, id)
+        next if oa.nil? || ob.nil?
+
+        shared += 1
+        same += 1 if oa == ob
+      end
+      [same, shared]
+    end
+
+    # The full pairwise matrix, as {[a, b] => [same, shared]} for a < b.
+    def agreement_pairs
+      @agreement_pairs ||= parsers.combination(2).to_h { |a, b| [[a, b], agreement(a, b)] }
+    end
+
+    # Cases every parser produced the identical output for. A high count here
+    # is the boring majority of YAML; what is left is the interesting part.
+    def unanimous_case_ids
+      @unanimous_case_ids ||= case_ids.select do |id|
+        outs = parsers.map { |p| output_for(p, id) }
+        !outs.any?(&:nil?) && outs.uniq.size == 1
+      end
+    end
+
+    # Cases where the parsers split into two or more camps, with the camps.
+    # Returns [id, {output => [parser, ...]}] sorted by how divided the case is.
+    def contested
+      @contested ||= case_ids.filter_map do |id|
+        camps = Hash.new { |h, k| h[k] = [] }
+        parsers.each do |p|
+          o = output_for(p, id)
+          camps[o] << p unless o.nil?
+        end
+        next if camps.size < 2
+
+        [id, camps]
+      end.sort_by { |id, camps| [-camps.size, id] }
+    end
+
     def duration
       return nil unless started_at && finished_at
 
@@ -86,6 +163,92 @@ module Report
       io.puts
       io.puts "legend: #{run.kinds.map { |k| "#{glyph(k)} #{KIND_LABEL[k]}" }.join('   ')}"
       io.puts
+    end
+
+    # Agreement is reported after conformance because it answers the second
+    # question, not because it matters less: a parser can be conformant and
+    # still be the odd one out, and vice versa.
+    def terminal_agreement(run, io: $stdout)
+      total = run.case_ids.size
+      unanimous = run.unanimous_case_ids.size
+
+      io.puts
+      io.puts "agreement — how often two parsers produced the same output, not whether it was right"
+      io.puts
+      io.puts agreement_table(run)
+      io.puts
+      io.puts format('  all %d parsers identical on %d/%d cases (%.1f%%); %d contested',
+                     run.parsers.size, unanimous, total,
+                     total.zero? ? 0 : 100.0 * unanimous / total,
+                     run.contested.size)
+      io.puts
+      return if run.contested.empty?
+
+      io.puts contested_lines(run)
+      io.puts
+    end
+
+    # A grid of pairwise agreement percentages.
+    #
+    # The diagonal is left blank rather than filled with 100%: a parser agreeing
+    # with itself is not information, and an unbroken diagonal of the same
+    # number makes the grid harder to scan.
+    def agreement_table(run)
+      pairs = run.agreement_pairs
+      head = ['parser'] + run.parsers.map { |p| short(p) }
+
+      rows = run.parsers.map do |a|
+        cells = run.parsers.map do |b|
+          next '.' if a == b
+
+          same, shared = pairs[[a, b]] || pairs[[b, a]]
+          shared.to_i.zero? ? '-' : format('%.0f', 100.0 * same / shared)
+        end
+        [short(a)] + cells
+      end
+
+      render_table(head, rows, align: [:left] + run.parsers.map { :right })
+    end
+
+    # The cases the parsers split on, with who is in which camp.
+    #
+    # Capped, because the full list is long and the top of it is the part worth
+    # reading: a case that splits the field three or four ways is a corner of
+    # the spec nobody agrees on, which is more interesting than the many cases
+    # where one parser stands alone.
+    def contested_lines(run, limit: 15)
+      rows = run.contested.first(limit).map do |id, camps|
+        groups = camps.sort_by { |_, ps| [-ps.size, ps.first] }.map do |out, ps|
+          "#{camp_label(out, camps)}: #{ps.map { |p| short(p) }.join(' ')}"
+        end
+        [id, camps.size.to_s, groups.join('  |  ')]
+      end
+
+      render_table(%w[case camps split], rows, align: %i[left right left])
+    end
+
+    # Names a camp so two camps on the same case are told apart.
+    #
+    # "parsed" alone is useless when every camp parsed and they merely disagree
+    # about the result, which is the most interesting kind of split. Naming the
+    # first line the outputs differ on says what the disagreement is about.
+    def camp_label(out, camps)
+      return 'error' if out == :error
+      return 'parsed' if camps.size < 2
+
+      others = camps.keys.reject { |o| o.equal?(out) }
+      ref = others.find { |o| o != :error }
+      return 'parsed' if ref.nil?
+
+      # An events run compares arrays of event lines, so the first line the two
+      # differ on names the disagreement precisely. A value run compares parsed
+      # JSON, where there is no line to point at -- the rendered value is the
+      # most specific thing available.
+      return out.inspect[0, 28] unless out.is_a?(Array) && ref.is_a?(Array)
+
+      i = out.each_index.find { |n| out[n] != ref[n] } || [out.size, ref.size].min
+      line = out[i]
+      line.nil? ? "ends at #{i}" : line.to_s[0, 28]
     end
 
     # The headline: one row per parser, one column per failure kind.
@@ -155,6 +318,34 @@ module Report
       out << "\nFailure kinds:\n\n"
       run.kinds.each { |k| out << "- **#{KIND_LABEL[k]}** — #{KIND_BLURB[k]}\n" }
 
+      out << "\n## Agreement\n\n"
+      out << "How often two parsers produced the same output — not whether it was right.\n"
+      out << "A pair can agree on a wrong answer, and two parsers can both fail a case\n"
+      out << "while disagreeing about how.\n\n"
+      out << md_table(['', *run.parsers.map { |p| short(p) }],
+                      run.parsers.map do |a|
+                        [short(a)] + run.parsers.map do |b|
+                          next '—' if a == b
+
+                          same, shared = run.agreement_pairs[[a, b]] || run.agreement_pairs[[b, a]]
+                          shared.to_i.zero? ? '-' : format('%.0f%%', 100.0 * same / shared)
+                        end
+                      end)
+      out << format("\nAll %d parsers produced identical output on %d of %d cases (%.1f%%).\n",
+                    run.parsers.size, run.unanimous_case_ids.size, run.case_ids.size,
+                    run.case_ids.empty? ? 0 : 100.0 * run.unanimous_case_ids.size / run.case_ids.size)
+
+      unless run.contested.empty?
+        out << "\n### Contested cases\n\n"
+        out << "Sorted by how many ways the field split.\n\n"
+        out << md_table(%w[case camps split], run.contested.first(40).map do |id, camps|
+          groups = camps.sort_by { |_, ps| [-ps.size, ps.first] }.map do |o, ps|
+            "#{camp_label(o, camps)}: #{ps.map { |p| short(p) }.join(' ')}"
+          end
+          [format('`%s`', id), camps.size.to_s, groups.join(' · ')]
+        end)
+      end
+
       out << "\n## Failures by case\n\n"
       if run.failing_case_ids.empty?
         out << "Every parser passed every case.\n"
@@ -210,6 +401,34 @@ module Report
           {
             case: r.case_id, parser: r.parser, kind: KIND_LABEL[r.status],
             detail: r.detail, got: r.got, want: r.want
+          }
+        end,
+        agreement: {
+          unanimous: run.unanimous_case_ids,
+          contested: run.contested.map do |id, camps|
+            {
+              case: id,
+              camps: camps.map { |out, ps| { parsers: ps, error: out == :error } }
+            }
+          end,
+          pairs: run.agreement_pairs.map do |(a, b), (same, shared)|
+            {
+              a: a, b: b, same: same, shared: shared,
+              rate: shared.zero? ? nil : (100.0 * same / shared).round(2)
+            }
+          end
+        },
+        # Every row, passes included, with what the parser actually produced.
+        #
+        # The failures list above answers "was it right"; this answers "what
+        # did it say", which is a different question and not derivable from the
+        # first. Two parsers can fail the same case with different output, and
+        # two can agree exactly while both being wrong -- neither shows up in a
+        # pass/fail tally. Agreement statistics are computed from here.
+        results: run.results.map do |r|
+          {
+            case: r.case_id, parser: r.parser, kind: KIND_LABEL[r.status],
+            got: r.got
           }
         end
       }

@@ -12,11 +12,14 @@ tags their meaning. Both are recovered by a lexical prescan of the source,
 below.
 """
 
+import json
 import os
 import re
 import sys
 
 import ryml
+
+JSON_MODE = "--json" in sys.argv[1:]
 
 
 def escape(s):
@@ -337,7 +340,37 @@ def events(src):
     return out
 
 
-def parse_quietly(src):
+def values(src):
+    """The loaded value, as rapidyaml itself projects it onto JSON.
+
+    ryml has no native-object load API, so a hand-written resolver here would
+    be measuring this file rather than the library. emit_json is the library's
+    own projection: it applies ryml's scalar resolution and writes JSON, which
+    is precisely what the suite states.
+
+    ryml folds a stream into one tree whose root children are the documents,
+    so a multi-document stream is emitted per document to match the suite's
+    one-JSON-value-per-document form.
+    """
+    tree = ryml.parse_in_arena(ryml.u(src.encode("utf-8")))
+    root = tree.root_id()
+
+    if tree.is_stream(root):
+        ids = list(ryml.children(tree, root))
+    else:
+        ids = [root]
+
+    out = []
+    for i in ids:
+        raw = ryml.emit_json(tree, i)
+        text = raw if isinstance(raw, str) else bytes(raw).decode("utf-8")
+        text = text.strip()
+        # An empty document emits nothing; the suite states that as null.
+        out.append(json.loads(text) if text else None)
+    return out
+
+
+def parse_quietly(src, fn=None):
     """ryml's error handler writes to fd 2 before raising, so mute the fd.
 
     The message survives on the exception, which is all the batch protocol
@@ -348,7 +381,7 @@ def parse_quietly(src):
     saved = os.dup(2)
     try:
         os.dup2(devnull, 2)
-        return events(src)
+        return (fn or events)(src)
     finally:
         os.dup2(saved, 2)
         os.close(saved)
@@ -367,7 +400,10 @@ def main():
         nbytes = int(stdin.readline().decode("utf-8").strip())
         doc = stdin.read(nbytes)
         try:
-            lines = parse_quietly(doc.decode("utf-8"))
+            if JSON_MODE:
+                lines = [json.dumps(parse_quietly(doc.decode("utf-8"), values))]
+            else:
+                lines = parse_quietly(doc.decode("utf-8"))
             sys.stdout.write("=== %s OK\n" % case_id)
             sys.stdout.write("".join(l + "\n" for l in lines))
         except BaseException as exc:

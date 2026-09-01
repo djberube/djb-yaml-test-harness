@@ -6,13 +6,22 @@ straight translation rather than a tree walk.
 Runs both PyYAML backends: the pure-Python parser by default, and the libyaml
 binding with --c. Same image, same code -- the only difference is which Loader
 class supplies the events, which is exactly the comparison worth making.
+
+With --json, emits the *loaded value* as JSON instead of the event stream.
+That is a different question about the same parser: the events are what the
+parser built, the JSON is what PyYAML's constructor resolved them to. PyYAML
+implements the YAML 1.1 type set, so `yes` becomes True and `20:03:20` becomes
+72200 -- neither of which the event stream shows.
 """
 
+import datetime
+import json
 import sys
 
 import yaml
 
 C_MODE = "--c" in sys.argv[1:]
+JSON_MODE = "--json" in sys.argv[1:]
 
 # Check the flag PyYAML sets when its extension loaded, not for a particular
 # class name: which of CParser/CSafeLoader/CLoader gets re-exported varies
@@ -94,6 +103,49 @@ def events(text):
     return out
 
 
+def project(obj):
+    """Project a loaded Python value onto JSON's type set.
+
+    Lossy in one direction only: anything JSON cannot represent is rendered so
+    that it cannot accidentally equal a correct answer. A date resolved where
+    the suite expects a string has to stay visible as a difference.
+    """
+    if isinstance(obj, dict):
+        return {project_key(k): project(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [project(v) for v in obj]
+    if isinstance(obj, bool) or obj is None:
+        return obj
+    if isinstance(obj, (int, float, str)):
+        return obj
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    if isinstance(obj, bytes):
+        # !!binary. The suite states these as strings, so decoding keeps a
+        # correct answer comparable; an undecodable payload is tagged instead.
+        try:
+            return obj.decode("utf-8")
+        except UnicodeDecodeError:
+            return "#<bytes %d>" % len(obj)
+    if isinstance(obj, set):
+        return {project_key(k): True for k in obj}
+    return "#<%s>" % type(obj).__name__
+
+
+def project_key(key):
+    """JSON object keys are strings. A non-string key is itself often the
+    finding, so it is rendered rather than coerced away."""
+    k = project(key)
+    if isinstance(k, str):
+        return k
+    return json.dumps(k, sort_keys=True)
+
+
+def values(text):
+    loader = yaml.CSafeLoader if C_MODE else yaml.SafeLoader
+    return [project(d) for d in yaml.load_all(text, Loader=loader)]
+
+
 def main():
     stdin = sys.stdin.buffer
     stdout = sys.stdout
@@ -110,7 +162,10 @@ def main():
         doc = stdin.read(nbytes)
 
         try:
-            lines = events(doc.decode("utf-8"))
+            if JSON_MODE:
+                lines = [json.dumps(values(doc.decode("utf-8")))]
+            else:
+                lines = events(doc.decode("utf-8"))
             stdout.write("=== %s OK\n" % case_id)
             stdout.write("".join(l + "\n" for l in lines))
         except BaseException as exc:

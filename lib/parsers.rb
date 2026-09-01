@@ -13,8 +13,13 @@
 # `value: true` marks an emitter that also supports `--json`, which makes it
 # print the *loaded value* as JSON rather than the event stream. Those parsers
 # can be scored on the suite's `json:` expectations as well as its `tree:`
-# ones. Only the Ruby emitters do so far; the rest are event-only, and the
-# value run skips them rather than reporting a zero.
+# ones. Every emitter does; the flag stays because the value run has to skip
+# any that does not rather than reporting a zero for a mode it cannot answer.
+#
+# Each emitter projects its own language's loaded value onto JSON's type set,
+# and each does it with the library's own resolver rather than a reimplemented
+# schema -- the point is to measure what the library returns, not what this
+# harness can reconstruct.
 module Parsers
   # The wire protocol between the harness and a container.
   #
@@ -63,8 +68,9 @@ module Parsers
       lang: 'Python',
       note: "PyYAML's pure-Python parser.",
       dir: 'pyyaml',
-      tag: 'djb-yaml/pyyaml:1',
+      tag: 'djb-yaml/pyyaml:2',
       cmd: %w[python3 /emit.py],
+      value: true,
       version_cmd: ['python3', '-c', 'import yaml;print("pyyaml"+yaml.__version__,end="")']
     },
 
@@ -73,8 +79,9 @@ module Parsers
       lang: 'Python',
       note: "PyYAML's libyaml binding. Same C library as Psych.",
       dir: 'pyyaml',
-      tag: 'djb-yaml/pyyaml:1',
+      tag: 'djb-yaml/pyyaml:2',
       cmd: %w[python3 /emit.py --c],
+      value: true,
       version_cmd: ['python3', '-c',
                     'import yaml;print("pyyaml"+yaml.__version__+"/libyaml"+".".join(map(str,yaml.__with_libyaml__ and __import__("_yaml").get_version() or ())),end="")']
     },
@@ -84,8 +91,9 @@ module Parsers
       lang: 'C++',
       note: 'rapidyaml via its Python bindings. Aims at YAML 1.2.',
       dir: 'rapidyaml',
-      tag: 'djb-yaml/rapidyaml:1',
+      tag: 'djb-yaml/rapidyaml:2',
       cmd: %w[python3 /emit.py],
+      value: true,
       version_cmd: ['python3', '-c', 'import ryml;print("rapidyaml"+getattr(ryml,"__version__","?"),end="")']
     },
 
@@ -94,8 +102,9 @@ module Parsers
       lang: 'JavaScript',
       note: 'The de facto YAML parser for Node. YAML 1.2 core schema.',
       dir: 'js_yaml',
-      tag: 'djb-yaml/js-yaml:1',
+      tag: 'djb-yaml/js-yaml:2',
       cmd: %w[node /emit.js],
+      value: true,
       version_cmd: ['node', '-e', 'process.stdout.write("js-yaml"+require("js-yaml/package.json").version)']
     },
 
@@ -104,8 +113,9 @@ module Parsers
       lang: 'Go',
       note: 'gopkg.in/yaml.v3, the parser behind most Go tooling.',
       dir: 'go_yaml',
-      tag: 'djb-yaml/go-yaml:1',
+      tag: 'djb-yaml/go-yaml:2',
       cmd: %w[/emit],
+      value: true,
       version_cmd: %w[/emit --version]
     },
 
@@ -114,8 +124,9 @@ module Parsers
       lang: 'Rust',
       note: 'Maintained fork of yaml-rust; targets YAML 1.2.',
       dir: 'saphyr',
-      tag: 'djb-yaml/saphyr:1',
+      tag: 'djb-yaml/saphyr:2',
       cmd: %w[/emit],
+      value: true,
       version_cmd: %w[/emit --version]
     },
 
@@ -124,8 +135,9 @@ module Parsers
       lang: 'Java',
       note: 'The YAML 1.2 rewrite of SnakeYAML. Reference-grade 1.2 support.',
       dir: 'snakeyaml',
-      tag: 'djb-yaml/snakeyaml:1',
+      tag: 'djb-yaml/snakeyaml:2',
       cmd: %w[java -cp /app/classes:/app/deps/* Emit],
+      value: true,
       version_cmd: %w[java -cp /app/classes:/app/deps/* Emit --version]
     }
   }.freeze

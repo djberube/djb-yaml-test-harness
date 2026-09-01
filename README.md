@@ -29,17 +29,26 @@ SnakeYAML Engine       339   83.7%                6             1             59
 suite states a `json:` for:
 
 ```
-parser            pass  pass%  accepts-invalid  wrong-value  rejects-valid
-----------------  ----  -----  ---------------  -----------  -------------
-Psych (libyaml)    301  82.5%               16           11             37
-Psych (libfyaml)   353  96.7%                .           11              1
+parser                pass  pass%  accepts-invalid  wrong-value  rejects-valid
+--------------------  ----  -----  ---------------  -----------  -------------
+Psych (libyaml)        301  82.5%               16           11             37
+Psych (libfyaml)       353  96.7%                .           11              1
+PyYAML (pure)          287  78.6%               12           10             56
+PyYAML (CSafeLoader)   290  79.5%               15           10             50
+rapidyaml              335  91.8%                4           18              8
+js-yaml                349  95.6%                .            .             16
+go-yaml v3             299  81.9%               15            7             44
+saphyr                 348  95.3%                .           17              .
+SnakeYAML Engine       298  81.6%                6            3             58
 ```
 
-Only the Ruby emitters implement the value pass so far; the others are scored on
-events alone. That gap is the interesting part of the table. Psych on libfyaml
-parses almost everything correctly — 403 of 405 event streams — and still gets
-eleven values wrong, the same count as the libyaml build. Swapping the C parser
-fixes the syntax layer and leaves `Psych::ScalarScanner` untouched on top of it.
+The gap between the two tables is the interesting part. Psych on libfyaml parses
+almost everything correctly — 403 of 405 event streams — and still gets eleven
+values wrong, the same count as the libyaml build. Swapping the C parser fixes
+the syntax layer and leaves `Psych::ScalarScanner` untouched on top of it.
+saphyr makes the same trade more sharply: it rejects nothing and mis-parses
+nothing, then resolves 17 documents to the wrong value. js-yaml is the only
+parser here with no wrong-value cases at all.
 
 Every parser runs in its own container against a pinned library version, so a
 number in those tables is attributable to a specific build rather than to
@@ -65,6 +74,7 @@ Later runs reuse both.
 ./bin/conform --matrix-only               # the Psych version matrix
 ./bin/conform --values                    # score events and loaded values
 ./bin/conform --values-only               # score loaded values instead
+./bin/conform --no-agreement              # skip the pairwise agreement tables
 ./bin/conform --only psych,js-yaml        # just these two
 ./bin/conform --case '4MUZ|DK95'          # just cases matching this regex
 ./bin/conform --no-report                 # terminal only
@@ -214,14 +224,77 @@ Each image asserts its own `Psych::VERSION` and `Psych::LIBYAML_VERSION` at buil
 time, so an invalid combination fails the build instead of quietly reporting a
 row that says something other than what it claims.
 
+## Agreement
+
+Conformance asks whether a parser matched the suite. Agreement asks whether two
+parsers matched *each other* — a different question with a different answer.
+Two libraries can fail the same case in two different ways, or agree exactly
+while both being wrong; neither shows up in a pass/fail tally. This is the
+practical question behind "will this file survive a trip through another
+language's parser".
+
+Pairwise agreement on **event streams**, as a percentage of the 405 cases:
+
+```
+parser  psych  fyaml  pyyaml  pyy-c  ryml  jsyaml  go  saphyr  snake
+------  -----  -----  ------  -----  ----  ------  --  ------  -----
+psych       .     82      85    100    77      80  94      78     84
+fyaml      82      .      79     79    89     100  81      92     80
+pyyaml     85     79       .     94    76      82  85      78     92
+pyy-c     100     79      94      .    76      83  88      79     87
+ryml       77     89      76     76     .      88  77      88     78
+jsyaml     80    100      82     83    88       .  78     100     85
+go         94     81      85     88    77      78   .      78     85
+saphyr     78     92      78     79    88     100  78       .     81
+snake      84     80      92     87    78      85  85      81      .
+```
+
+All nine produce identical output on 288 of 405 cases (71.1%); 117 are
+contested.
+
+`psych` and `pyyaml-c` agree on **100%** — different languages, different
+bindings, byte-identical event streams on all 405 cases, because underneath both
+is the same libyaml. That is the cleanest evidence in this repo that the binding
+contributes nothing and the C library decides everything.
+
+On values that pair drops to 90.4%. Same parser, same events, and the Ruby and
+Python schema layers still disagree about 35 documents.
+
+The other 100% cell is `psych-fyaml` with `js-yaml` and `saphyr` — three
+implementations in three languages that share no code, converging because they
+all target YAML 1.2 rather than 1.1.
+
+Reading the low end is just as useful: `rapidyaml` sits at 75-78% against the
+1.1 parsers, which is what a parser aimed at a different spec version looks
+like from the outside.
+
+The reports list the contested cases with who is in which camp, and name the
+first event line the camps differ on:
+
+```
+case     camps  split
+-------  -----  ---------------------------------------------------------------
+4ABK         3  =VAL :omitted value: fyaml pyyaml ryml jsyaml saphyr snake  |
+                error: psych pyy-c  |  =VAL :omitted value:: go
+Y2GN         2  =VAL &an ::chor value: psych go  |  =VAL &an:chor :value: fyaml jsyaml
+```
+
+`Y2GN` is an anchor with a colon in its name. Psych and go-yaml read the anchor
+as `&an` and the value as `:chor value`; libfyaml and js-yaml read `&an:chor`
+with the value `value`. Both camps parse it. Only one is right.
+
+Pass `--no-agreement` to skip these tables.
+
 ## Reports
 
 Each scored run writes four files to `reports/`. With `--values` both runs are
 written, suffixed `-events` and `-value`:
 
 - **`report.md`** — summary table, per-case matrix, and a detail list per parser
-- **`report.json`** — the same data, with the full expected-vs-actual event
-  streams for every failure
+- **`report.json`** — the same data, plus every row's actual output (passes
+  included) and the computed agreement blocks. The failures list answers "was it
+  right"; the results list answers "what did it say", which is not derivable
+  from the first and is what the agreement statistics are computed from
 - **`matrix.csv`** — case × parser, for a spreadsheet
 - **`report.txt`** — the terminal output, saved
 
@@ -245,6 +318,22 @@ stdout: ("=== <id> OK\n" <event lines>)  or  ("=== <id> ERR\n" <one-line message
 
 Byte lengths rather than delimiters, because YAML documents contain every
 delimiter one might pick — including lines of dots and dashes.
+
+With `--json` the emitter writes one line per case instead: the loaded value of
+the whole stream, as a JSON array with one element per document. Mark the parser
+`value: true` in `lib/parsers.rb` once it does; the value run skips any parser
+that does not rather than reporting a zero for a mode it cannot answer.
+
+Use the library's own loader for that, not a schema reimplemented in the
+emitter — the number is supposed to describe the library. Where a language has
+no loader, use whatever the library does expose: `docker/rapidyaml/emit.py`
+calls ryml's `emit_json`, which is rapidyaml applying its own scalar resolution.
+
+The projection onto JSON's type set must be lossy in one direction only. A Ruby
+Symbol is rendered `#<Symbol :foo>`, not `":foo"` — rendering it as the string
+would make the projection launder Psych's `:foo` coercion into a pass, which is
+exactly the bug the value run exists to find. Same for NaN, Infinity, and any
+object JSON cannot represent.
 
 `docker/js_yaml/emit.js` is the cleanest reference: js-yaml exposes a genuine
 event API, so it translates events one-for-one. `docker/psych/emit.rb` shows the

@@ -11,6 +11,11 @@
 // arrives as tag:yaml.org,2002:str, a bare `!` arrives as "!", and an
 // untagged plain scalar arrives with no tag at all -- which is exactly the
 // suite's rule of recording only a tag the document actually stated.
+//
+// With --json, emits the loaded value as JSON instead of the event stream:
+// what the Engine resolved the document to rather than what its parser built.
+// SnakeYAML Engine implements the YAML 1.2 core schema, so `yes` stays a
+// string where the 1.1 parsers make it a boolean.
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -21,6 +26,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import java.util.Map;
+import java.util.Set;
+
+import org.snakeyaml.engine.v2.api.Load;
 import org.snakeyaml.engine.v2.api.LoadSettings;
 import org.snakeyaml.engine.v2.api.lowlevel.Parse;
 import org.snakeyaml.engine.v2.common.ScalarStyle;
@@ -154,11 +163,131 @@ public final class Emit {
     return b;
   }
 
+  // --- the loaded-value projection ------------------------------------------
+  //
+  // No JSON library is on the classpath and one dependency for one serializer
+  // is not worth it, so the projection writes JSON directly. Lossy in one
+  // direction only: anything JSON cannot represent is rendered so that it
+  // cannot accidentally equal a correct answer.
+  private static void writeJson(Object v, StringBuilder sb) {
+    if (v == null) {
+      sb.append("null");
+    } else if (v instanceof String) {
+      writeJsonString((String) v, sb);
+    } else if (v instanceof Boolean) {
+      sb.append(v.toString());
+    } else if (v instanceof Number) {
+      writeJsonNumber((Number) v, sb);
+    } else if (v instanceof Map) {
+      sb.append('{');
+      boolean first = true;
+      for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
+        if (!first) sb.append(',');
+        first = false;
+        writeJsonString(projectKey(e.getKey()), sb);
+        sb.append(':');
+        writeJson(e.getValue(), sb);
+      }
+      sb.append('}');
+    } else if (v instanceof Set) {
+      // !!set loads as a Set; the suite states it as an object of true values.
+      sb.append('{');
+      boolean first = true;
+      for (Object k : (Set<?>) v) {
+        if (!first) sb.append(',');
+        first = false;
+        writeJsonString(projectKey(k), sb);
+        sb.append(":true");
+      }
+      sb.append('}');
+    } else if (v instanceof Iterable) {
+      sb.append('[');
+      boolean first = true;
+      for (Object x : (Iterable<?>) v) {
+        if (!first) sb.append(',');
+        first = false;
+        writeJson(x, sb);
+      }
+      sb.append(']');
+    } else if (v instanceof byte[]) {
+      // !!binary. The suite states these as strings.
+      writeJsonString(new String((byte[]) v, StandardCharsets.UTF_8), sb);
+    } else {
+      writeJsonString("#<" + v.getClass().getSimpleName() + ">", sb);
+    }
+  }
+
+  // JSON has no NaN or Infinity. Rendering them as tagged strings keeps a
+  // parser that produced one visible instead of emitting invalid JSON.
+  private static void writeJsonNumber(Number n, StringBuilder sb) {
+    double d = n.doubleValue();
+    if (n instanceof Double || n instanceof Float) {
+      if (Double.isNaN(d)) { writeJsonString("#<NaN>", sb); return; }
+      if (Double.isInfinite(d)) {
+        writeJsonString(d > 0 ? "#<Infinity>" : "#<-Infinity>", sb);
+        return;
+      }
+    }
+    sb.append(n.toString());
+  }
+
+  // JSON object keys are strings; a non-string key is itself often the
+  // finding, so it is rendered rather than coerced away.
+  private static String projectKey(Object k) {
+    if (k instanceof String) return (String) k;
+    StringBuilder sb = new StringBuilder();
+    writeJson(k, sb);
+    return sb.toString();
+  }
+
+  private static void writeJsonString(String s, StringBuilder sb) {
+    sb.append('"');
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      switch (c) {
+        case '"': sb.append("\\\""); break;
+        case '\\': sb.append("\\\\"); break;
+        case '\n': sb.append("\\n"); break;
+        case '\r': sb.append("\\r"); break;
+        case '\t': sb.append("\\t"); break;
+        case '\b': sb.append("\\b"); break;
+        case '\f': sb.append("\\f"); break;
+        default:
+          if (c < 0x20) {
+            sb.append(String.format("\\u%04x", (int) c));
+          } else {
+            sb.append(c);
+          }
+      }
+    }
+    sb.append('"');
+  }
+
+  private static List<String> values(String doc) {
+    Load load = new Load(LoadSettings.builder().build());
+    StringBuilder sb = new StringBuilder();
+    sb.append('[');
+    boolean first = true;
+    for (Object o : load.loadAllFromString(doc)) {
+      if (!first) sb.append(',');
+      first = false;
+      writeJson(o, sb);
+    }
+    sb.append(']');
+    List<String> out = new ArrayList<>();
+    out.add(sb.toString());
+    return out;
+  }
+
   public static void main(String[] argv) throws IOException {
+    boolean jsonMode = false;
     for (String arg : argv) {
       if (arg.equals("--version")) {
         System.out.println(VERSION);
         return;
+      }
+      if (arg.equals("--json")) {
+        jsonMode = true;
       }
     }
 
@@ -180,7 +309,7 @@ public final class Emit {
       try {
         // Materialize before printing the OK header: the Engine parses lazily,
         // so a syntax error surfaces partway through the iteration.
-        List<String> lines = events(doc);
+        List<String> lines = jsonMode ? values(doc) : events(doc);
         out.print("=== " + id + " OK\n");
         for (String line : lines) out.print(line + "\n");
       } catch (Throwable t) {

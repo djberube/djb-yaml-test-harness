@@ -32,7 +32,8 @@ options = {
   case_filter: nil,
   write_reports: true,
   matrix: true,
-  score: %i[events]
+  score: %i[events],
+  agreement: true
 }
 
 OptionParser.new do |o|
@@ -44,6 +45,7 @@ OptionParser.new do |o|
   o.on('--matrix-only', 'just the Psych version matrix, plus the baseline it varies from') do
     options[:only] = Parsers::MATRIX_SET.dup
   end
+  o.on('--no-agreement', 'skip the pairwise agreement tables') { options[:agreement] = false }
   o.on('--values', 'also score loaded values against the suite json:') do
     options[:score] = %i[events value]
   end
@@ -168,6 +170,7 @@ runs.each do |run|
   puts "== #{run.title}"
   puts "   #{MODES[run.mode][:blurb]}"
   Report.terminal(run, matrix: options[:matrix])
+  Report.terminal_agreement(run) if options[:agreement] && run.parsers.size > 1
 end
 
 if options[:write_reports]

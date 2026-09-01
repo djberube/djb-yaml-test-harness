@@ -11,9 +11,16 @@
 //   - Collections carry no flow/block flag. A flow collection's start event
 //     points at its opening `[` or `{`, and a block one points at its first
 //     item, so the byte under the span start settles it.
+//
+// With --json, emits the loaded value as JSON instead of the event stream:
+// what saphyr resolved the document to rather than what its parser built. The
+// value comes from the `saphyr` crate's own loader, not a schema reimplemented
+// here, so the numbers describe the library. saphyr targets YAML 1.2, so `yes`
+// and `20:03:20` stay strings where the 1.1 parsers convert them.
 
 use std::io::{self, Read, Write};
 
+use saphyr::{LoadableYamlNode, Scalar, Yaml};
 use saphyr_parser::{Event, Parser, ScalarStyle};
 
 const VERSION: &str = "saphyr-parser 0.0.6";
@@ -401,7 +408,100 @@ fn props(
 // stdin:  (<id>\n<nbytes>\n<bytes>)* then "."
 // stdout: ("=== <id> <OK|ERR>\n" <lines>)*
 
+/// Writes a JSON string literal, escaping what JSON requires.
+fn json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Projects a loaded value onto JSON's type set.
+///
+/// Lossy in one direction only: anything JSON cannot represent is rendered so
+/// that it cannot accidentally equal a correct answer. An alias that saphyr
+/// could not resolve, or a BadValue, has to stay visible as a difference.
+fn project(node: &Yaml, out: &mut String) {
+    match node {
+        Yaml::Value(Scalar::Null) => out.push_str("null"),
+        Yaml::Value(Scalar::Boolean(b)) => out.push_str(if *b { "true" } else { "false" }),
+        Yaml::Value(Scalar::Integer(i)) => out.push_str(&i.to_string()),
+        Yaml::Value(Scalar::FloatingPoint(f)) => {
+            let v = f.into_inner();
+            // JSON has no NaN or Infinity; tag them rather than emit invalid JSON.
+            if v.is_nan() {
+                json_string("#<NaN>", out);
+            } else if v.is_infinite() {
+                json_string(if v > 0.0 { "#<Infinity>" } else { "#<-Infinity>" }, out);
+            } else {
+                out.push_str(&v.to_string());
+            }
+        }
+        Yaml::Value(Scalar::String(s)) => json_string(s, out),
+        Yaml::Sequence(items) => {
+            out.push('[');
+            for (i, it) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                project(it, out);
+            }
+            out.push(']');
+        }
+        Yaml::Mapping(map) => {
+            out.push('{');
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                // JSON object keys are strings; a non-string key is itself
+                // often the finding, so it is rendered rather than dropped.
+                match k {
+                    Yaml::Value(Scalar::String(s)) => json_string(s, out),
+                    other => {
+                        let mut inner = String::new();
+                        project(other, &mut inner);
+                        json_string(&inner, out);
+                    }
+                }
+                out.push(':');
+                project(v, out);
+            }
+            out.push('}');
+        }
+        other => {
+            json_string(&format!("#<{other:?}>"), out);
+        }
+    }
+}
+
+/// Every document in the stream, as one JSON array.
+fn values(text: &str) -> Result<Vec<String>, String> {
+    let docs = Yaml::load_from_str(text).map_err(|e| e.to_string())?;
+    let mut out = String::from("[");
+    for (i, d) in docs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        project(d, &mut out);
+    }
+    out.push(']');
+    Ok(vec![out])
+}
+
 fn main() {
+    let json_mode = std::env::args().skip(1).any(|a| a == "--json");
     if std::env::args().skip(1).any(|a| a == "--version") {
         println!("{VERSION}");
         return;
@@ -457,7 +557,13 @@ fn main() {
         // A parser that overflows the stack on a pathological document is
         // still reporting a verdict, so a panic is caught and recorded rather
         // than taking down the batch.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| events(text)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if json_mode {
+                values(text)
+            } else {
+                events(text)
+            }
+        }));
 
         match result {
             Ok(Ok(lines)) => {

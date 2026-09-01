@@ -6,15 +6,22 @@
 // stream, so the package is vendored under internal/goyaml with a small shim
 // re-exporting those events; see internal/goyaml/events.go. This file is a
 // direct translation of that stream, the same shape as the js-yaml emitter.
+//
+// With --json, emits the loaded value as JSON instead: what go-yaml resolved
+// the document to rather than what its parser built. go-yaml decodes into
+// interface{} using its own resolver, so `yes` becomes true and a timestamp
+// becomes a time.Time -- neither of which the event stream shows.
 package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	goyaml "github.com/djb/yaml-harness/go_yaml/internal/goyaml"
 )
@@ -158,11 +165,84 @@ func events(src []byte) (lines []string, err error) {
 // stdin:  (<id>\n<nbytes>\n<bytes>)* then "."
 // stdout: ("=== <id> <OK|ERR>\n" <lines>)*
 
+// project maps a decoded value onto JSON's type set. Lossy in one direction
+// only: anything JSON cannot represent is rendered so it cannot accidentally
+// equal a correct answer.
+func project(v interface{}) interface{} {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			out[k] = project(val)
+		}
+		return out
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			out[projectKey(k)] = project(val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, val := range t {
+			out[i] = project(val)
+		}
+		return out
+	case time.Time:
+		return t.Format(time.RFC3339)
+	case []byte:
+		// !!binary. The suite states these as strings, so decoding keeps a
+		// correct answer comparable.
+		return string(t)
+	case string, bool, int, int64, uint64, float64:
+		return t
+	default:
+		return fmt.Sprintf("#<%T>", t)
+	}
+}
+
+// JSON object keys are strings; a non-string key is itself often the finding,
+// so it is rendered rather than coerced away.
+func projectKey(k interface{}) string {
+	p := project(k)
+	if s, ok := p.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Sprintf("%v", p)
+	}
+	return string(b)
+}
+
+// values decodes every document in the stream, one JSON value each.
+func values(doc []byte) ([]interface{}, error) {
+	dec := goyaml.NewDecoder(strings.NewReader(string(doc)))
+	out := []interface{}{}
+	for {
+		var v interface{}
+		err := dec.Decode(&v)
+		if err != nil {
+			if err == io.EOF {
+				return out, nil
+			}
+			return nil, err
+		}
+		out = append(out, project(v))
+	}
+}
+
 func main() {
+	jsonMode := false
 	for _, a := range os.Args[1:] {
 		if a == "--version" {
 			fmt.Println(version)
 			return
+		}
+		if a == "--json" {
+			jsonMode = true
 		}
 	}
 
@@ -197,7 +277,22 @@ func main() {
 			break
 		}
 
-		lines, eerr := events(doc)
+		var lines []string
+		var eerr error
+		if jsonMode {
+			var vs []interface{}
+			vs, eerr = values(doc)
+			if eerr == nil {
+				b, merr := json.Marshal(vs)
+				if merr != nil {
+					eerr = merr
+				} else {
+					lines = []string{string(b)}
+				}
+			}
+		} else {
+			lines, eerr = events(doc)
+		}
 		if eerr != nil {
 			kind := "ParserError"
 			if pe, ok := eerr.(*goyaml.ParseError); ok {

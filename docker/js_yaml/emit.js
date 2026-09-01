@@ -8,6 +8,12 @@
 
 const yaml = require('js-yaml');
 
+// With --json, emit the loaded value rather than the event stream: what
+// js-yaml resolved the document to, not what its parser built. js-yaml
+// implements the YAML 1.2 core schema, so `yes` stays a string where the 1.1
+// parsers turn it into a boolean -- a difference the event stream never shows.
+const JSON_MODE = process.argv.slice(2).includes('--json');
+
 const { EVENT_DOCUMENT, EVENT_SEQUENCE, EVENT_MAPPING, EVENT_SCALAR,
         EVENT_ALIAS, EVENT_POP, SCALAR_STYLE, COLLECTION_STYLE } = yaml;
 
@@ -136,6 +142,46 @@ function events(src) {
 // stdin:  (<id>\n<nbytes>\n<bytes>)* then "."
 // stdout: ("=== <id> <OK|ERR>\n" <lines>)*
 
+// Project a loaded value onto JSON's type set. Lossy in one direction only:
+// anything JSON cannot represent is rendered so it cannot accidentally equal a
+// correct answer.
+function project(v) {
+  if (v === null || v === undefined) return null;
+  if (Array.isArray(v)) return v.map(project);
+  if (v instanceof Date) return v.toISOString();
+  if (v instanceof RegExp) return '#<RegExp ' + String(v) + '>';
+  if (v instanceof Map) {
+    const o = {};
+    for (const [k, val] of v) o[projectKey(k)] = project(val);
+    return o;
+  }
+  if (v instanceof Set) {
+    const o = {};
+    for (const k of v) o[projectKey(k)] = true;
+    return o;
+  }
+  if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') return v;
+  if (typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v)) o[projectKey(k)] = project(v[k]);
+    return o;
+  }
+  return '#<' + typeof v + '>';
+}
+
+// JSON object keys are strings; a non-string key is itself often the finding,
+// so it is rendered rather than coerced away.
+function projectKey(k) {
+  const p = project(k);
+  return typeof p === 'string' ? p : JSON.stringify(p);
+}
+
+function values(src) {
+  const docs = [];
+  yaml.loadAll(src, (d) => docs.push(project(d === undefined ? null : d)));
+  return docs;
+}
+
 function main() {
   const chunks = [];
   process.stdin.on('data', (c) => chunks.push(c));
@@ -160,8 +206,11 @@ function main() {
       pos += n;
 
       try {
+        // Produce the lines before writing the OK header: a throw partway
+        // through must not leave a header claiming success.
+        const lines = JSON_MODE ? [JSON.stringify(values(doc))] : events(doc);
         out.push('=== ' + id.trim() + ' OK');
-        for (const line of events(doc)) out.push(line);
+        for (const line of lines) out.push(line);
       } catch (err) {
         const msg = String((err && err.message) || err).split('\n')[0].trim();
         out.push('=== ' + id.trim() + ' ERR');
