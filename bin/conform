@@ -11,6 +11,8 @@
 #   bin/conform --values                 score event streams and loaded values
 #   bin/conform --matrix-only            the Psych version matrix and its baseline
 #   bin/conform --list                   what parsers are configured
+#   bin/conform --custom-only            just the local cases in data/custom_cases/
+#   bin/conform --no-custom              skip them
 #   bin/conform --no-report              terminal only, write no files
 #
 # Exit status is 0 when the run completed, 1 when a parser could not be run at
@@ -26,6 +28,9 @@ require 'suite'
 require 'parsers'
 require 'runner'
 require 'report'
+require 'case_report'
+require 'custom_cases'
+require 'custom_report'
 
 options = {
   only: nil,
@@ -33,7 +38,8 @@ options = {
   write_reports: true,
   matrix: true,
   score: %i[events],
-  agreement: true
+  agreement: true,
+  custom: true
 }
 
 OptionParser.new do |o|
@@ -53,6 +59,11 @@ OptionParser.new do |o|
     options[:score] = %i[value]
   end
   o.on('--case REGEX', 'only cases whose id matches') { |v| options[:case_filter] = v }
+  o.on('--no-custom', "skip the local cases in data/custom_cases/") { options[:custom] = false }
+  o.on('--custom-only', 'run only the local cases in data/custom_cases/') do
+    options[:custom] = true
+    options[:custom_only] = true
+  end
   o.on('--no-report', 'skip writing report files') { options[:write_reports] = false }
   o.on('--no-matrix', 'skip the per-case matrix in terminal output') { options[:matrix] = false }
   o.on('--out DIR', 'where to write reports') { |v| Config.send(:remove_const, :REPORT_DIR); Config.const_set(:REPORT_DIR, v) }
@@ -75,15 +86,31 @@ rescue ArgumentError => e
   abort "error: #{e.message}"
 end
 
-cases = begin
-  Suite.cases(filter: options[:case_filter])
-rescue Suite::Error => e
-  abort "error: #{e.message}"
+# --custom-only skips the suite entirely, checkout and all. The point of the
+# flag is a fast loop while adding a local case, and cloning 350 files to then
+# not read them would defeat it.
+cases =
+  if options[:custom_only]
+    []
+  else
+    begin
+      Suite.cases(filter: options[:case_filter])
+    rescue Suite::Error => e
+      abort "error: #{e.message}"
+    end
+  end
+
+custom_cases = options[:custom] ? CustomCases.cases(filter: options[:case_filter]) : []
+
+if options[:custom_only]
+  abort "error: no cases in #{CustomCases::DIR.sub("#{Config::ROOT}/", '')}" if custom_cases.empty?
+else
+  abort 'error: no cases matched' if cases.empty?
 end
 
-abort 'error: no cases matched' if cases.empty?
-
-warn "running #{cases.size} cases against #{parsers.size} parser(s)"
+unless cases.empty?
+  warn "running #{cases.size} cases against #{parsers.size} parser(s)"
+end
 
 # Each mode is a separate run over the same cases, reported separately. They
 # answer different questions -- what the parser built, versus what the library
@@ -103,6 +130,8 @@ runs = []
 failed_parsers = []
 
 options[:score].each do |mode|
+  next if cases.empty?
+
   eligible = parsers.select { |n| mode == :events || Parsers[n][:value] }
 
   if eligible.empty?
@@ -159,11 +188,12 @@ options[:score].each do |mode|
     finished_at: Time.now,
     suite_ref: Config::SUITE_REF,
     mode: mode,
-    title: MODES[mode][:title]
+    title: MODES[mode][:title],
+    cases: mode_cases
   )
 end
 
-abort 'error: no parser could be run' if runs.empty?
+abort 'error: no parser could be run' if runs.empty? && !options[:custom_only]
 
 runs.each do |run|
   puts
@@ -173,12 +203,112 @@ runs.each do |run|
   Report.terminal_agreement(run) if options[:agreement] && run.parsers.size > 1
 end
 
+# --- the local corpus -------------------------------------------------------
+#
+# Run after the scored runs and kept out of `runs` entirely. These documents
+# carry no expectation (see lib/custom_cases.rb), so there is nothing to score
+# them against -- they get their own probe, their own terminal section, and
+# their own directory under reports/. Nothing here can move a pass rate, which
+# is the whole reason the corpus is separate.
+probes = []
+
+unless custom_cases.empty?
+  puts
+  puts "custom cases — #{custom_cases.size} local document(s), unscored"
+
+  options[:score].each do |mode|
+    eligible = parsers.select { |n| mode == :events || Parsers[n][:value] } - failed_parsers
+    next if eligible.empty?
+
+    puts
+    puts "  #{CustomReport::MODE_TITLE[mode]} — #{CustomReport::MODE_BLURB[mode].downcase}"
+
+    started = Time.now
+    observations = []
+    versions = {}
+    ran = []
+
+    eligible.each do |name|
+      spec = Parsers[name]
+      print format('    %-22s ', spec[:label])
+      $stdout.flush
+
+      begin
+        versions[name] = Runner.version(name)
+        seen = Runner.probe(name, custom_cases, mode: mode)
+        observations.concat(seen.values)
+        ran << name
+        parsed = seen.values.count(&:ok?)
+        puts format(' %d parsed, %d rejected', parsed, seen.size - parsed)
+      rescue Docker::Error => e
+        puts ' SKIPPED'
+        warn "      #{e.message.lines.first.to_s.strip}"
+        failed_parsers << name
+      end
+    end
+
+    next if ran.empty?
+
+    probes << CustomReport::Probe.new(
+      observations: observations,
+      parsers: ran,
+      versions: versions,
+      cases: custom_cases,
+      mode: mode,
+      started_at: started,
+      finished_at: Time.now
+    )
+  end
+
+  # A per-case summary rather than a per-parser one. With no expectation there
+  # is no column to total, so what the terminal can usefully say is how many
+  # ways the field split on each document.
+  probes.each do |probe|
+    puts
+    puts "== custom cases: #{CustomReport::MODE_TITLE[probe.mode].downcase}"
+    puts
+    probe.case_ids.each do |id|
+      camps = probe.camps(id)
+      # Report.camp_label names a camp by the first thing it produced that the
+      # other camps did not, so two camps that both parsed are told apart.
+      # "parsed: 3 | parsed: 1" would be a line that reports a disagreement
+      # without saying what it is about.
+      groups = camps.sort_by { |_, ps| [-ps.size, ps.first] }.map do |out, ps|
+        "#{Report.camp_label(out, camps)}: #{ps.size}"
+      end
+      puts format('   %-28s %d camp%s   %s', id, camps.size,
+                  camps.size == 1 ? ' ' : 's', groups.join('  |  '))
+    end
+    puts
+  end
+end
+
+abort 'error: no parser could be run' if runs.empty? && probes.empty?
+
 if options[:write_reports]
   runs.each do |run|
     suffix = runs.size > 1 ? "-#{run.mode}" : nil
     paths = Report.write_all(run, suffix: suffix)
     puts "wrote (#{run.mode}):"
     paths.each_value { |p| puts "  #{p.sub("#{Config::ROOT}/", '')}" }
+  end
+
+  # Written from every run at once rather than once per mode: a case file holds
+  # both scores, so the event and value runs would otherwise overwrite each
+  # other's half.
+  unless runs.empty?
+    written = CaseReport.write_all(runs)
+    puts "wrote #{written.size} case file(s):"
+    puts "  #{File.join(Config::REPORT_DIR, 'cases').sub("#{Config::ROOT}/", '')}/"
+  end
+
+  # Its own directory, written from every mode at once for the same reason the
+  # scored case files are: a custom case's page holds both the events and the
+  # values it produced, and one mode writing alone would drop the other half.
+  unless probes.empty?
+    made = CustomReport.write_all(probes)
+    puts "wrote #{made.size} custom case file(s):"
+    puts "  #{File.join(Config::REPORT_DIR, CustomReport::DIRNAME).sub("#{Config::ROOT}/", '')}/"
   end
 end
 

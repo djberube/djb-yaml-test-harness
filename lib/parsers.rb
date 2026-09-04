@@ -13,8 +13,9 @@
 # `value: true` marks an emitter that also supports `--json`, which makes it
 # print the *loaded value* as JSON rather than the event stream. Those parsers
 # can be scored on the suite's `json:` expectations as well as its `tree:`
-# ones. Every emitter does; the flag stays because the value run has to skip
-# any that does not rather than reporting a zero for a mode it cannot answer.
+# ones. Every real library does; the two reference parsers do not, because they
+# parse and stop -- no schema, no loader, nothing to ask for a value. The value
+# run skips them rather than reporting a zero for a mode they cannot answer.
 #
 # Each emitter projects its own language's loaded value onto JSON's type set,
 # and each does it with the library's own resolver rather than a reimplemented
@@ -139,6 +140,58 @@ module Parsers
       cmd: %w[java -cp /app/classes:/app/deps/* Emit],
       value: true,
       version_cmd: %w[java -cp /app/classes:/app/deps/* Emit --version]
+    },
+
+    'yamlstar' => {
+      label: 'YAMLStar',
+      lang: 'Clojure',
+      note: 'Pure-Clojure YAML 1.2 stack. Parser and loader are separate artifacts.',
+      dir: 'yamlstar',
+      tag: 'djb-yaml/yamlstar:1',
+      cmd: ['java', '-cp', '/app/lib/*', 'clojure.main', '/app/emit.clj'],
+      value: true,
+      version_cmd: ['java', '-cp', '/app/lib/*', 'clojure.main', '/app/emit.clj', '--version']
+    },
+
+    # --- the reference parsers ------------------------------------------------
+    #
+    # These two are not libraries anyone ships. They are generated from the
+    # YAML 1.2 spec grammar -- one function per BNF production -- which makes
+    # them the closest executable thing to the spec itself, and slow enough
+    # that nobody would parse a config file with one.
+    #
+    # They are here as the control rows. Every other row is a hand-written
+    # approximation of the same grammar, so a case one of them fails and
+    # a reference row passes is a deviation from the spec; a case the reference
+    # rows fail too is a place the spec, the suite, or the generated grammar
+    # disagree with each other. That distinction is not available from the
+    # suite's expectations alone.
+    #
+    # Both are `value: false`. A reference parser is a parser and stops there:
+    # it builds an event stream and has no schema, no tag resolution to native
+    # types, and no loader. The value run skips them rather than scoring a
+    # question they do not answer.
+
+    'ref-js' => {
+      label: 'reference (JS)',
+      lang: 'JavaScript',
+      note: 'YAML 1.2 reference parser, generated from the spec grammar.',
+      dir: 'ref_js',
+      tag: 'djb-yaml/ref-js:1',
+      cmd: %w[node /emit.js],
+      value: false,
+      version_cmd: %w[node /version.js]
+    },
+
+    'ref-perl' => {
+      label: 'reference (Perl)',
+      lang: 'Perl',
+      note: 'The same spec grammar generated into Perl. Pinned to one commit with ref-js.',
+      dir: 'ref_perl',
+      tag: 'djb-yaml/ref-perl:1',
+      cmd: %w[perl /emit.pl],
+      value: false,
+      version_cmd: %w[perl /version.pl]
     }
   }.freeze
 

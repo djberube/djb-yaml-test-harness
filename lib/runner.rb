@@ -27,6 +27,33 @@ module Runner
     def fail? = !pass? && status != :harness_error
   end
 
+  # What one parser did with one *unjudged* document, from the custom corpus.
+  #
+  # Deliberately not a Result. A Result carries a `status` that is a verdict
+  # against the suite, and these documents have no expectation to be judged
+  # against -- reusing the struct would leave a verdict field that either lies
+  # or is permanently nil. The three outcomes here are the parser's own, not
+  # this harness's opinion of them:
+  #
+  #   :ok       parsed; `output` is the event stream, or the loaded value
+  #   :error    refused the document; `output` is its message
+  #   :no_output the runner got nothing back, usually a timeout
+  Observation = Struct.new(:case_id, :parser, :outcome, :output, :mode,
+                           keyword_init: true) do
+    def ok? = outcome == :ok
+    def error? = outcome == :error
+
+    # The comparable form, matching Report::Run#output_for: a rejection
+    # compares as the bare symbol :error, because two parsers refusing the same
+    # document agree about the document even when their messages read nothing
+    # alike.
+    def comparable
+      return nil if outcome == :no_output
+
+      outcome == :error ? :error : output
+    end
+  end
+
   class << self
     # Runs every case through one parser, in batches.
     #
@@ -67,6 +94,33 @@ module Runner
       'unknown'
     end
 
+    # What a parser does with a document nobody has stated an expectation for.
+    #
+    # `run` above answers "was it right", which needs an oracle. This answers
+    # "what did it say", which does not -- it returns the parser's own outcome
+    # with no comparison at all. That is what the custom corpus in
+    # data/custom_cases needs: those documents carry no `tree:` and no `json:`,
+    # so there is nothing to judge them against, and inventing a verdict would
+    # be asserting a right answer this harness does not have.
+    #
+    # Returns {case_id => Observation}.
+    def probe(parser_name, cases, mode: :events)
+      spec = Parsers[parser_name] or raise ArgumentError, "unknown parser #{parser_name}"
+      raise ArgumentError, "#{parser_name} cannot load values" if mode == :value && !spec[:value]
+
+      Docker.ensure_image(spec[:dir], spec[:tag], dockerfile: spec[:dockerfile])
+
+      out = {}
+      cases.each_slice(Config::BATCH_SIZE) do |batch|
+        emitted = invoke(spec, batch, mode)
+        batch.each do |kase|
+          out[kase.id] = observe(parser_name, kase, emitted[kase.id], mode)
+          yield out[kase.id] if block_given?
+        end
+      end
+      out
+    end
+
     private
 
     # One container invocation for a batch of cases. Returns id => raw output.
@@ -90,6 +144,30 @@ module Runner
       end
 
       split(out.to_s.force_encoding(Encoding::UTF_8).scrub)
+    end
+
+    # Turns a raw emitter section into an Observation, with no comparison.
+    def observe(parser_name, kase, emitted, mode)
+      mk = ->(outcome, output) do
+        Observation.new(case_id: kase.id, parser: parser_name,
+                        outcome: outcome, output: output, mode: mode)
+      end
+
+      return mk.call(:no_output, nil) if emitted.nil?
+      return mk.call(:error, emitted[:lines].first.to_s.strip) unless emitted[:ok]
+
+      if mode == :value
+        # The value run's output is one JSON line. Parsed here so the report
+        # can render and compare structures rather than strings, where two
+        # emitters differing only in key order would look like a disagreement.
+        begin
+          return mk.call(:ok, JSON.parse(emitted[:lines].first.to_s))
+        rescue JSON::ParserError
+          return mk.call(:ok, emitted[:lines].first.to_s)
+        end
+      end
+
+      mk.call(:ok, emitted[:lines].map(&:rstrip).reject(&:empty?))
     end
 
     # Splits the concatenated `=== <id> <OK|ERR>` sections back apart.

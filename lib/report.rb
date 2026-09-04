@@ -15,7 +15,9 @@ require_relative 'parsers'
 #   json      the same data, for anything downstream
 #
 # Terminal output is the summary plus a matrix of failures only; the files
-# carry everything.
+# carry everything. The fifth view -- one file per failing case, with every
+# parser's verdict on it -- lives in case_report.rb, because it is written
+# from all of a run's modes at once rather than one run at a time.
 module Report
   # Ordered so the columns read worst-to-least-ambiguous, which is also
   # roughly the order a reader cares about: silently wrong beats loudly wrong.
@@ -39,7 +41,14 @@ module Report
   }.freeze
 
   Run = Struct.new(:results, :parsers, :versions, :case_count, :started_at,
-                   :finished_at, :suite_ref, :mode, :title, keyword_init: true) do
+                   :finished_at, :suite_ref, :mode, :title, :cases, keyword_init: true) do
+    # The Suite::Case objects this run scored, by id. Carried so a report can
+    # show the document that produced a failure and not just the verdict;
+    # nothing else here needs them, so it is allowed to be empty.
+    def cases_by_id
+      @cases_by_id ||= (cases || []).to_h { |c| [c.id, c] }
+    end
+
     # Only the kinds this run can actually produce. An events run never yields
     # wrong_value and a value run never yields wrong_events, so showing both
     # columns would print a permanently empty one in each.
@@ -459,6 +468,15 @@ module Report
 
     # --- shared bits ---------------------------------------------------------
 
+    # Public because the per-case files in lib/case_report.rb build the same
+    # kind of table.
+    def md_table(head, rows)
+      out = +"| #{head.join(' | ')} |\n"
+      out << "|#{head.map { '---' }.join('|')}|\n"
+      rows.each { |r| out << "| #{r.join(' | ')} |\n" }
+      out
+    end
+
     private
 
     def run_header(run)
@@ -507,7 +525,8 @@ module Report
       {
         'psych' => 'psych', 'psych-fyaml' => 'fyaml', 'pyyaml' => 'pyyaml',
         'pyyaml-c' => 'pyy-c', 'rapidyaml' => 'ryml', 'js-yaml' => 'jsyaml',
-        'go-yaml' => 'go', 'saphyr' => 'saphyr', 'snakeyaml' => 'snake'
+        'go-yaml' => 'go', 'saphyr' => 'saphyr', 'snakeyaml' => 'snake',
+        'yamlstar' => 'ystar'
       }.fetch(parser_id) { matrix_short(parser_id) }
     end
 
@@ -542,13 +561,6 @@ module Report
       out = [fmt.call(head), widths.map { |w| '-' * w }.join('  ')]
       rows.each { |r| out << fmt.call(r) }
       out.join("\n")
-    end
-
-    def md_table(head, rows)
-      out = +"| #{head.join(' | ')} |\n"
-      out << "|#{head.map { '---' }.join('|')}|\n"
-      rows.each { |r| out << "| #{r.join(' | ')} |\n" }
-      out
     end
   end
 end

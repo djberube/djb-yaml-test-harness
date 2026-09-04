@@ -1,0 +1,4 @@
+# name: %YAML 2.0 — a major version the spec says to reject, in prose the grammar does not encode
+%YAML 2.0
+---
+x: 3

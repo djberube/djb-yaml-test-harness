@@ -77,6 +77,8 @@ Later runs reuse both.
 ./bin/conform --no-agreement              # skip the pairwise agreement tables
 ./bin/conform --only psych,js-yaml        # just these two
 ./bin/conform --case '4MUZ|DK95'          # just cases matching this regex
+./bin/conform --custom-only               # just the local cases in data/custom_cases/
+./bin/conform --no-custom                 # skip them
 ./bin/conform --no-report                 # terminal only
 ./bin/conform --out /tmp/run1             # write reports elsewhere
 ```
@@ -139,6 +141,8 @@ inflate every parser by the same ~40 cases.
 | `go-yaml` | go-yaml v3 | Go | the parser behind most Go tooling |
 | `saphyr` | saphyr | Rust | maintained fork of yaml-rust |
 | `snakeyaml` | SnakeYAML Engine | Java | the YAML 1.2 rewrite |
+| `ref-js` | reference parser | JavaScript | generated from the YAML 1.2 spec grammar |
+| `ref-perl` | reference parser | Perl | the same grammar, second language |
 
 Plus nine more under `--matrix-only` that vary Ruby, psych, and libyaml
 independently; see [the Psych version matrix](#the-psych-version-matrix).
@@ -148,6 +152,31 @@ The pairs are the point. `psych` and `psych-fyaml` differ only in which C parser
 is linked in; `pyyaml` and `pyyaml-c` differ only in which Loader class runs.
 Any divergence within a pair is attributable to the C library rather than to the
 binding — which is exactly the distinction that is hard to make from the outside.
+
+### The reference rows
+
+`ref-js` and `ref-perl` come from
+[yaml/yaml-reference-parser](https://github.com/yaml/yaml-reference-parser), and
+they are not libraries anyone ships. They are *generated* from the YAML 1.2 spec
+grammar — one function per BNF production — which makes them about as close to
+an executable copy of the spec as exists, and slow enough that nobody would read
+a config file with one.
+
+They are here as controls. Every other row is a hand-written approximation of
+the same grammar, so the reference rows turn a failure into a diagnosis: a case
+some parser fails and the reference passes is that parser deviating from the
+spec, and a case the reference fails too is a place where the spec, the suite,
+and the generated grammar do not agree with each other. The suite's
+expectations alone cannot tell those apart.
+
+Both rows are one grammar rendered into two languages, pinned to the same
+commit, so a disagreement *between them* is the generator or the host language
+rather than anyone's reading of the spec.
+
+They score event streams only. A reference parser parses and stops — no schema,
+no tag resolution to native types, no loader — so there is nothing to ask for a
+value, and the value run skips them rather than reporting a zero for a question
+they do not answer.
 
 ## The Psych version matrix
 
@@ -287,8 +316,9 @@ Pass `--no-agreement` to skip these tables.
 
 ## Reports
 
-Each scored run writes four files to `reports/`. With `--values` both runs are
-written, suffixed `-events` and `-value`:
+Each scored run writes four files to `reports/`, plus a shared `cases/`
+directory. With `--values` both runs are written, suffixed `-events` and
+`-value`:
 
 - **`report.md`** — summary table, per-case matrix, and a detail list per parser
 - **`report.json`** — the same data, plus every row's actual output (passes
@@ -302,6 +332,130 @@ The per-case matrix is the part worth reading. A row where every parser fails is
 a hard corner of the spec; a row where one parser fails alone is that parser's
 bug. Reading down the `psych` and `pyyaml-c` columns shows the libyaml family
 failing in lockstep.
+
+### Per-case files
+
+`reports/cases/` holds one Markdown file per failing case — `4ABK.md`, `A2M4.md`
+and so on, with `#` in a case id written as `-` so `4MUZ#0` becomes `4MUZ-0.md`.
+Where the tables above are organized by parser, these are the transpose: one
+case, every parser's verdict on it side by side.
+
+Each file carries the document that produced the failure, what the suite
+expected, a table of which parsers failed and how, and the distinct outputs the
+failing parsers produced — grouped, so nine parsers making the same two mistakes
+print two streams rather than nine. `reports/cases/README.md` indexes them,
+worst case first.
+
+Both scored runs land in the same file rather than one directory per mode. A
+case that fails the event run and passes the value run is a specific and
+interesting thing — the parser built the wrong stream and still resolved the
+right object — and splitting the two would hide exactly that.
+
+Only failing cases get a file. The cases every parser passes have nothing to say,
+and writing them would bury the ones that do.
+
+## Custom cases
+
+`data/custom_cases/` holds documents this project cares about that the suite
+does not cover — a directive nobody implements, a construct that turned up in a
+real config file, whatever the last bug report was about. Each file is one
+document, verbatim: no wrapper, no metadata, whatever bytes are in
+`data/custom_cases/foo.yml` are the bytes handed to every parser.
+
+They carry **no expectation**, and that is the point. The suite states what a
+parser should build and this harness scores against it; a custom case asks the
+weaker and more useful question of what each parser *does*, with no claim about
+which answer is right. There is no oracle, so there is nothing to pass or fail.
+
+They also never enter the scored totals. A pass rate is a number against a fixed
+published corpus, and quietly folding local cases into it would make "81.7%"
+mean something different in this checkout than anywhere else. Custom cases run
+after the scored runs, report into their own directory, and cannot move any
+number in the tables above.
+
+Adding one is a matter of dropping a file in:
+
+```sh
+printf 'yes: no\n' > data/custom_cases/yes_no.yml
+./bin/conform --custom-only --values
+```
+
+An optional first line of `# name: something` becomes the case's label in the
+report and is stripped from the document before it is handed to any parser — it
+is metadata, not content, and a `%YAML` or `%TAG` directive has to precede
+everything in its document, so a comment left above one would quietly change
+what the case tests. The filename is the case id either way.
+
+### The custom report
+
+`reports/custom_cases/` gets one Markdown file per document, plus a `README.md`
+index and a `custom_cases.json`. A page carries the document, a table of what
+each parser did with it, and the distinct outputs grouped — twelve parsers
+usually produce two or three distinct answers, and printing the same stream
+twelve times would bury the disagreement.
+
+The organizing idea is **camps**: how many distinct things the field produced.
+One camp is a document every parser handled identically. More than one is a
+fault line, and the page says who is on which side.
+
+```
+   unknown_directive            2 camps   parsed: 9  |  error: 3
+   yaml_2_0_directive           2 camps   error: 7  |  parsed: 5
+   yes_no                       1 camp    parsed: 12
+```
+
+Nine parsers, including both reference parsers, accept a `%UNKNOWNDIRECTIVE` and
+carry on. Psych, PyYAML's `CSafeLoader` and go-yaml refuse the document — the
+first two being the same libyaml underneath, as usual.
+
+`%YAML 2.0` splits the field almost evenly, and splits it the other way. Seven
+libraries reject the document:
+
+| parser | message |
+|---|---|
+| Psych (libyaml) | `found incompatible YAML document` |
+| Psych (libfyaml) | `could not parse YAML at line 0 column 0` |
+| PyYAML (pure) | `found incompatible YAML document (version 1.* is required)` |
+| PyYAML (CSafeLoader) | `found incompatible YAML document` |
+| js-yaml | `unacceptable YAML version of the document (2:1)` |
+| go-yaml v3 | `found incompatible YAML document` |
+| SnakeYAML Engine | `Version{major=2, minor=0}` |
+
+rapidyaml, saphyr and YAMLStar parse it as an ordinary document, and so do both
+reference parsers — which here is a fact about the reference parsers rather than
+a verdict on the other seven. The spec's version rule is prose, not grammar:
+§6.8.1 says a document with a higher *major* version should be rejected and a
+higher *minor* version should warn, but the production it generates from is
+
+```
+ns-yaml-version ::= ns-dec-digit+ '.' ns-dec-digit+
+```
+
+which `2.0` satisfies as readily as `1.2`. The reference parsers are generated
+from those productions, so they have nothing to reject with. This is the one
+place in this harness where the reference rows are *not* the more spec-faithful
+answer, and it is a useful reminder of what they actually are: an executable
+copy of the grammar, not of the specification.
+
+So the seven rejecting parsers are following the spec here and the five
+accepting ones are not — the reverse of the usual reading. What the case is
+worth keeping for is that the split exists at all, and that it does not line up
+with any of the groupings the scored reports produce. Both Psych builds reject,
+unlike `yes_no` and `unknown_directive` where they land in different camps; and
+rapidyaml, saphyr and YAMLStar accept, having implemented the grammar and not
+the paragraph. The suite states no expectation for `%YAML 2.0`, so none of this
+appears anywhere in the scored tables.
+
+The value run splits separately from the event run, which is where the schema
+differences show up. `yes: no` parses to the identical event stream in all
+twelve parsers and then resolves two different ways: `{"yes": "no"}` in seven of
+them, and `{"true": false}` in Psych-on-libyaml and both PyYAMLs, which still
+read YAML 1.1 booleans.
+
+Psych on libfyaml lands in the *first* camp — same Ruby, same psych gem, same
+`Psych::ScalarScanner`, different answer. Which is the kind of thing a custom
+case is for: the suite has no `yes: no` document to state an expectation about,
+so nothing in the scored reports would have surfaced it.
 
 ## Adding a parser
 
@@ -368,6 +522,7 @@ Environment variables, all optional:
 | `YAML_HARNESS_OUT` | `reports` | where reports are written |
 | `YAML_HARNESS_TIMEOUT` | `10` | per-case seconds before a batch is abandoned |
 | `YAML_HARNESS_BATCH` | `64` | cases per container invocation |
+| `YAML_CUSTOM_DIR` | `data/custom_cases` | where the local corpus lives |
 
 The suite ref is pinned rather than floating: an unpinned corpus would make two
 runs of the same harness disagree for reasons that have nothing to do with the
