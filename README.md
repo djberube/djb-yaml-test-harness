@@ -1,13 +1,21 @@
 # djb-yaml-test-harness
 
-Runs the [yaml-test-suite](https://github.com/yaml/yaml-test-suite) against nine
-YAML parsers across seven languages and reports where each one disagrees with
-the spec — and with the others.
+YAML is usually described as a single format, and most of the time it behaves
+like one. Write a config file, hand it to a library, get a hash back. The
+trouble starts when the same file has to travel: written by a Ruby service,
+read by a Go sidecar, validated by a Python job. Each of those reaches for a
+different parser, and the parsers do not agree — not on which documents are
+well-formed, and not on what a well-formed document means.
 
-The suite states two expectations per case, and this harness scores both
-separately. `tree:` is the event stream the parser should build; `json:` is the
-value the library should hand back. They are different questions, and a parser
-can pass one while failing the other.
+This harness runs the [yaml-test-suite](https://github.com/yaml/yaml-test-suite)
+against ten YAML parsers across eight languages — plus two reference parsers
+generated from the spec grammar itself — and reports where each one disagrees
+with the spec, and with the others.
+
+The suite states two expectations per case, and we score both separately.
+`tree:` is the event stream the parser should build; `json:` is the value the
+library should hand back. They are different questions, and a parser can pass
+one while failing the other.
 
 **Event streams** — what the parser built:
 
@@ -23,6 +31,7 @@ js-yaml                404   99.8%                .             .              1
 go-yaml v3             324   80.0%               15             5             61
 saphyr                 403   99.5%                .             .              2
 SnakeYAML Engine       339   83.7%                6             1             59
+YAMLStar               404   99.8%                .             .              1
 ```
 
 **Loaded values** — what the library resolved that into, over the 365 cases the
@@ -40,24 +49,32 @@ js-yaml                349  95.6%                .            .             16
 go-yaml v3             299  81.9%               15            7             44
 saphyr                 348  95.3%                .           17              .
 SnakeYAML Engine       298  81.6%                6            3             58
+YAMLStar               352  96.4%                .            1             12
 ```
 
-The gap between the two tables is the interesting part. Psych on libfyaml parses
-almost everything correctly — 403 of 405 event streams — and still gets eleven
-values wrong, the same count as the libyaml build. Swapping the C parser fixes
-the syntax layer and leaves `Psych::ScalarScanner` untouched on top of it.
-saphyr makes the same trade more sharply: it rejects nothing and mis-parses
-nothing, then resolves 17 documents to the wrong value. js-yaml is the only
-parser here with no wrong-value cases at all.
+Reading the two tables against each other is where the useful information is.
+Psych on libfyaml parses almost everything correctly — 403 of 405 event streams
+— and still gets eleven values wrong, the same count as the libyaml build.
+Swapping the C parser fixes the syntax layer and leaves `Psych::ScalarScanner`
+untouched on top of it. saphyr makes the same trade more sharply: it rejects
+nothing and mis-parses nothing, then resolves 17 documents to the wrong value.
+js-yaml is the only parser here with no wrong-value cases at all, and YAMLStar
+comes within one of it. Both get there partly by declining to answer: js-yaml
+raises on 16 of the 365 valued cases and YAMLStar on 12. A parser that refuses a
+document cannot resolve it wrongly, so the wrong-value column is worth reading
+next to the rejects-valid one rather than on its own.
 
 Every parser runs in its own container against a pinned library version, so a
 number in those tables is attributable to a specific build rather than to
-whatever happened to be installed.
+whatever happened to be installed. The figures shown here come from a run in
+2026; re-running `bin/conform` on a checkout with newer pins will produce its
+own, and the point of pinning is that both runs remain explicable.
 
-Two rows are the same Ruby, the same Psych, and the same emitter, differing only
-in which C library is linked in. Two others are the same PyYAML differing only
-in the Loader class — and `pyyaml-c` matches `psych` in every column, because
-underneath both is the same libyaml.
+The rows are also arranged so that some of them can be read as controlled
+comparisons. Two are the same Ruby, the same Psych, and the same emitter,
+differing only in which C library is linked in. Two others are the same PyYAML
+differing only in the Loader class — and `pyyaml-c` matches `psych` in every
+column, because underneath both is the same libyaml.
 
 ## Quick start
 
@@ -65,9 +82,11 @@ underneath both is the same libyaml.
 ./bin/conform
 ```
 
-That is the whole setup. On first run it clones the test suite into
-`vendor/` (gitignored) and builds whichever container images are missing.
-Later runs reuse both.
+There is no separate install step. On first run the harness clones the test
+suite into `vendor/` (gitignored) and builds whichever container images are
+missing; later runs reuse both. Expect the first run to take a while, since it
+is building images across nine language toolchains, and the `psych-fyaml` image
+compiles libfyaml from source.
 
 ```sh
 ./bin/conform --list                      # what parsers are configured
@@ -106,9 +125,14 @@ parser's failure count.
 
 ### The two scores
 
-The event DSL records tags but not resolved native types, so an event-stream
-pass says nothing about what the library hands back. `bin/conform --values` runs
-the second pass, comparing the loaded value against the suite's `json:`.
+One may wonder why a second score is needed at all: if a parser built the right
+event stream, has it not already got the document right? The answer is that the
+event DSL records tags but not resolved native types. In `FBC9`, for instance,
+the suite expects the plain scalar `:foo` — written `=VAL ::foo`, since the DSL
+marks plain scalars with a leading colon of its own — and Psych emits exactly
+that, then hands back a Ruby Symbol rather than the string. `bin/conform
+--values` runs the second pass, comparing the loaded value against the suite's
+`json:`.
 
 That is where Psych's Ruby-isms show up, and they are not fixed by changing the
 C parser:
@@ -128,6 +152,30 @@ document has no meaningful JSON projection (an empty stream, a duplicate key, a
 value JSON cannot represent), and counting "no expectation" as a pass would
 inflate every parser by the same ~40 cases.
 
+### What it does not measure
+
+Worth being clear about the boundaries, since a pass percentage invites more
+weight than it can carry.
+
+The harness scores reading, not writing. Every parser here is asked to consume
+documents; none is asked to emit them, so the suite's `dump:` expectations go
+unused and round-tripping is out of scope entirely. A library can score well
+above and still produce YAML that its own parser reads back differently.
+
+Nothing here measures performance, memory, or resistance to hostile input.
+rapidyaml and libyaml are fast, the reference parsers are extremely slow, and
+none of that appears in any table. Neither do the qualities you would actually
+weigh when picking a library — API design, error message quality, maintenance
+activity, security history. A parser's conformance number is one input to that
+decision and not a ranking.
+
+The corpus is also the suite's, and the suite is built from the corners of the
+grammar rather than from what turns up in configuration files. This matters for
+how the percentages read: a parser at 80% is not failing one document in five
+that you hand it, it is failing one in five of a set assembled specifically from
+hard cases. `data/custom_cases/` exists partly to ask the other question, on
+documents you choose.
+
 ## Parsers
 
 | id | parser | language | notes |
@@ -141,6 +189,7 @@ inflate every parser by the same ~40 cases.
 | `go-yaml` | go-yaml v3 | Go | the parser behind most Go tooling |
 | `saphyr` | saphyr | Rust | maintained fork of yaml-rust |
 | `snakeyaml` | SnakeYAML Engine | Java | the YAML 1.2 rewrite |
+| `yamlstar` | YAMLStar | Clojure | pure-Clojure 1.2 stack, parser and loader separate |
 | `ref-js` | reference parser | JavaScript | generated from the YAML 1.2 spec grammar |
 | `ref-perl` | reference parser | Perl | the same grammar, second language |
 
@@ -148,10 +197,13 @@ Plus nine more under `--matrix-only` that vary Ruby, psych, and libyaml
 independently; see [the Psych version matrix](#the-psych-version-matrix).
 `bin/conform --list` prints both groups.
 
-The pairs are the point. `psych` and `psych-fyaml` differ only in which C parser
-is linked in; `pyyaml` and `pyyaml-c` differ only in which Loader class runs.
-Any divergence within a pair is attributable to the C library rather than to the
-binding — which is exactly the distinction that is hard to make from the outside.
+Two of these rows exist to be read as a pair, and two more as another. `psych`
+and `psych-fyaml` differ only in which C parser is linked in; `pyyaml` and
+`pyyaml-c` differ only in which Loader class runs. Any divergence within a pair
+is therefore attributable to the C library rather than to the binding — a
+distinction that is otherwise difficult to make from the outside, since a bug
+report says "Psych got this wrong" whether the fault lies in the Ruby or in the
+C.
 
 ### The reference rows
 
@@ -171,7 +223,10 @@ expectations alone cannot tell those apart.
 
 Both rows are one grammar rendered into two languages, pinned to the same
 commit, so a disagreement *between them* is the generator or the host language
-rather than anyone's reading of the spec.
+rather than anyone's reading of the spec. In practice they do not disagree: both
+score 404 of 405, failing the same single case, which is roughly the result you
+would hope for from a control and a mild reassurance that the suite and the
+grammar are describing the same language.
 
 They score event streams only. A reference parser parses and stops — no schema,
 no tag resolution to native types, no loader — so there is nothing to ask for a
@@ -180,7 +235,8 @@ they do not answer.
 
 ## The Psych version matrix
 
-"Psych 5.2.2 does X" underspecifies the thing. Psych's behaviour is the product
+Bug reports about YAML in Ruby tend to name a psych version: "Psych 5.2.2 does
+X." That underspecifies the thing considerably. Psych's behaviour is the product
 of three separately-versioned parts — the Ruby it runs on, the psych gem, and
 the libyaml it links against — and the version people quote is only the middle
 one. `bin/conform --matrix-only` builds nine images that vary one part at a time
@@ -233,6 +289,14 @@ none of it is attributable to Ruby. The same nine-fixed, three-regressed split
 shows up in the value run, because these are parse-layer differences that the
 value run inherits.
 
+Two practical conclusions follow. If you are chasing a YAML parsing difference
+between two machines, the psych version is generally the wrong place to look;
+check `Psych::LIBYAML_VERSION` on both first. And if the behaviour you need is
+in `Psych::ScalarScanner` rather than the parser — the Symbol coercion, the
+sexagesimal handling — no combination in this matrix will give it to you, which
+is the case for reaching past `YAML.load` to `Psych.parse` and resolving
+scalars yourself.
+
 ### Adding a combination
 
 `COMBOS` in `lib/parsers.rb` is the table; the Dockerfiles are generated from it.
@@ -265,37 +329,50 @@ language's parser".
 Pairwise agreement on **event streams**, as a percentage of the 405 cases:
 
 ```
-parser  psych  fyaml  pyyaml  pyy-c  ryml  jsyaml  go  saphyr  snake
-------  -----  -----  ------  -----  ----  ------  --  ------  -----
-psych       .     82      85    100    77      80  94      78     84
-fyaml      82      .      79     79    89     100  81      92     80
-pyyaml     85     79       .     94    76      82  85      78     92
-pyy-c     100     79      94      .    76      83  88      79     87
-ryml       77     89      76     76     .      88  77      88     78
-jsyaml     80    100      82     83    88       .  78     100     85
-go         94     81      85     88    77      78   .      78     85
-saphyr     78     92      78     79    88     100  78       .     81
-snake      84     80      92     87    78      85  85      81      .
+parser  psych  fyaml  pyyaml  pyy-c  ryml  jsyaml  go  saphyr  snake  ystar
+------  -----  -----  ------  -----  ----  ------  --  ------  -----  -----
+psych       .     82      93    100    77      82  97      82     90     82
+fyaml      82      .      81     82    94     100  80     100     84    100
+pyyaml     93     81       .     93    78      82  92      82     95     82
+pyy-c     100     82      93      .    77      82  97      82     90     82
+ryml       77     94      78     77     .      94  75      94     80     94
+jsyaml     82    100      82     82    94       .  80     100     84    100
+go         97     80      92     97    75      80   .      80     89     80
+saphyr     82    100      82     82    94     100  80       .     84    100
+snake      90     84      95     90    80      84  89      84      .     84
+ystar      82    100      82     82    94     100  80     100     84      .
 ```
 
-All nine produce identical output on 288 of 405 cases (71.1%); 117 are
-contested.
+All twelve rows, the two reference parsers included, produce identical output on
+288 of 405 cases (71.1%); the remaining 117 are contested.
 
 `psych` and `pyyaml-c` agree on **100%** — different languages, different
 bindings, byte-identical event streams on all 405 cases, because underneath both
-is the same libyaml. That is the cleanest evidence in this repo that the binding
-contributes nothing and the C library decides everything.
+is the same libyaml. At the parse layer, then, the binding contributes nothing
+we can measure; the C library decides the outcome.
 
 On values that pair drops to 90.4%. Same parser, same events, and the Ruby and
-Python schema layers still disagree about 35 documents.
+Python schema layers still disagree about 35 documents. Which is worth keeping
+in mind when a YAML file has to survive a trip between the two: the syntax will
+travel intact, and the types may not.
 
-The other 100% cell is `psych-fyaml` with `js-yaml` and `saphyr` — three
-implementations in three languages that share no code, converging because they
-all target YAML 1.2 rather than 1.1.
+The rest of the 100% cells form a single block: `psych-fyaml`, `js-yaml`,
+`saphyr` and `yamlstar` agree with each other, and with both reference parsers,
+on all 405 cases. That is six implementations in six languages — Ruby, JavaScript,
+Rust, Clojure, and the generated JS and Perl — sharing no code and converging
+exactly, because they all target YAML 1.2 rather than 1.1. Agreement with the
+reference rows is the part that makes this more than a coincidence: the four
+libraries are not merely agreeing with each other, they are agreeing with the
+grammar.
 
-Reading the low end is just as useful: `rapidyaml` sits at 75-78% against the
-1.1 parsers, which is what a parser aimed at a different spec version looks
-like from the outside.
+Which suggests a practical reading of the whole table. The spread is not a
+gradient of quality so much as a split into two families, and a parser's
+agreement score is mostly a statement about which YAML version it implements.
+
+The low end of the table repays reading too. `rapidyaml` sits at 75-78% against
+the 1.1 parsers, which is what a parser aimed at a different spec version looks
+like from the outside — not a quality judgment on any row, but a real
+compatibility cost if a file has to cross between them.
 
 The reports list the contested cases with who is in which camp, and name the
 first event line the camps differ on:
@@ -303,14 +380,22 @@ first event line the camps differ on:
 ```
 case     camps  split
 -------  -----  ---------------------------------------------------------------
-4ABK         3  =VAL :omitted value: fyaml pyyaml ryml jsyaml saphyr snake  |
-                error: psych pyy-c  |  =VAL :omitted value:: go
-Y2GN         2  =VAL &an ::chor value: psych go  |  =VAL &an:chor :value: fyaml jsyaml
+4ABK         3  =VAL :omitted value: fyaml pyyaml ryml jsyaml saphyr snake
+                ystar ref-js ref-pe  ·  error: psych pyy-c  ·
+                =VAL :omitted value:: go
+Y2GN         2  =VAL &an ::chor value: psych go  ·  =VAL &an:chor :value: fyaml jsyaml
 ```
 
 `Y2GN` is an anchor with a colon in its name. Psych and go-yaml read the anchor
 as `&an` and the value as `:chor value`; libfyaml and js-yaml read `&an:chor`
-with the value `value`. Both camps parse it. Only one is right.
+with the value `value`. Both camps parse it without complaint, which is what
+makes this the failure mode worth worrying about — nobody gets an exception,
+and two services disagree about what the document said.
+
+Here the control rows earn their keep. The suite expects `&an:chor`, and both
+reference parsers produce it, so the second camp is following the grammar and
+Psych and go-yaml are not. Without those rows this case would look like an open
+question rather than a settled one.
 
 Pass `--no-agreement` to skip these tables.
 
@@ -328,10 +413,10 @@ directory. With `--values` both runs are written, suffixed `-events` and
 - **`matrix.csv`** — case × parser, for a spreadsheet
 - **`report.txt`** — the terminal output, saved
 
-The per-case matrix is the part worth reading. A row where every parser fails is
-a hard corner of the spec; a row where one parser fails alone is that parser's
-bug. Reading down the `psych` and `pyyaml-c` columns shows the libyaml family
-failing in lockstep.
+Of these, the per-case matrix in `report.md` is where most questions get
+answered. A row where every parser fails is a hard corner of the spec; a row
+where one parser fails alone is that parser's bug. Reading down the `psych` and
+`pyyaml-c` columns shows the libyaml family failing in lockstep.
 
 ### Per-case files
 
@@ -362,10 +447,12 @@ real config file, whatever the last bug report was about. Each file is one
 document, verbatim: no wrapper, no metadata, whatever bytes are in
 `data/custom_cases/foo.yml` are the bytes handed to every parser.
 
-They carry **no expectation**, and that is the point. The suite states what a
-parser should build and this harness scores against it; a custom case asks the
-weaker and more useful question of what each parser *does*, with no claim about
-which answer is right. There is no oracle, so there is nothing to pass or fail.
+Custom cases deliberately carry **no expectation**. The suite states what a
+parser should build and the harness scores against it; a custom case asks the
+weaker question of what each parser *does*, with no claim about which answer is
+right. There is no oracle here, so there is nothing to pass or fail — which
+turns out to be the more useful question when you are holding a document from a
+real system and want to know who will read it your way.
 
 They also never enter the scored totals. A pass rate is a number against a fixed
 published corpus, and quietly folding local cases into it would make "81.7%"
@@ -394,9 +481,10 @@ each parser did with it, and the distinct outputs grouped — twelve parsers
 usually produce two or three distinct answers, and printing the same stream
 twelve times would bury the disagreement.
 
-The organizing idea is **camps**: how many distinct things the field produced.
-One camp is a document every parser handled identically. More than one is a
-fault line, and the page says who is on which side.
+These pages are organized around **camps**: how many distinct things the field
+produced for a given document. One camp means every parser handled it
+identically. More than one is a fault line, and the page names who is on which
+side.
 
 ```
    unknown_directive            2 camps   parsed: 9  |  error: 3
@@ -458,6 +546,9 @@ case is for: the suite has no `yes: no` document to state an expectation about,
 so nothing in the scored reports would have surfaced it.
 
 ## Adding a parser
+
+Adding a tenth parser is two steps, though the second of them — the emitter —
+is where the work is:
 
 1. Make a directory under `docker/` with a `Dockerfile` and an emitter.
 2. Add an entry to `lib/parsers.rb`.
